@@ -160,6 +160,8 @@ export interface FinishedPayload {
     isDefense: boolean;
   }>;
   pdfs: Array<[string, string]>;
+  /** 因内容与上次完全一致而跳过的条目。 */
+  unchanged: Array<{ key: string; title: string }>;
 }
 
 /** 自动续页上限。 */

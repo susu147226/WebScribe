@@ -5,9 +5,13 @@ import { mergeEntries, splitUrls } from "../services/urlInput";
 import {
   clearMergeRecords,
   environmentStatus,
+  exportLinkList,
+  importLinkList,
+  loadLinkList,
   onCrawlerEvent,
   openLogin,
   pickSaveDirectory,
+  saveLinkList,
   startCrawl,
   validateUrls,
 } from "../services/tauri";
@@ -99,6 +103,8 @@ interface TaskStore {
   refreshEnvironment: () => Promise<void>;
   run: () => Promise<void>;
   login: () => Promise<void>;
+  exportLinks: () => Promise<void>;
+  importLinks: () => Promise<void>;
   attachListeners: () => Promise<() => void>;
   dismissNotice: () => void;
 }
@@ -229,8 +235,12 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
       const entries = get().urlEntries;
       if (entries.length === 0) {
         set({ urlChecks: [], checkError: null });
+        void saveLinkList([]).catch(() => {});
         return;
       }
+
+      // 顺手记住列表，下次启动自动恢复，省得重新输入
+      void saveLinkList(entries).catch(() => {});
 
       void validateUrls(entries, get().maxUrls)
         .then((result) => {
@@ -287,9 +297,55 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
       const maxUrls = tiers.includes(get().maxUrls) ? get().maxUrls : fallback;
 
       set({ env, maxUrls });
+
+      // 恢复上次的链接列表，免去重复输入
+      if (get().urlEntries.length === 0) {
+        const remembered = await loadLinkList().catch(() => [] as string[]);
+        if (remembered.length > 0 && get().urlEntries.length === 0) {
+          set({
+            urlEntries: remembered.slice(0, maxUrls),
+            notice: `已恢复上次的 ${Math.min(remembered.length, maxUrls)} 条链接。`,
+          });
+        }
+      }
+
       get().revalidate();
     } catch (error) {
       set({ env: null, notice: `无法读取环境状态：${String(error)}` });
+    }
+  },
+
+  exportLinks: async () => {
+    const entries = get().urlEntries;
+    if (entries.length === 0) {
+      set({ validationError: "列表为空，没有可导出的链接。" });
+      return;
+    }
+
+    try {
+      const path = await exportLinkList(entries);
+      if (path) set({ notice: `已导出 ${entries.length} 条链接到 ${path}` });
+    } catch (error) {
+      set({ notice: `导出失败：${String(error)}` });
+    }
+  },
+
+  importLinks: async () => {
+    try {
+      const result = await importLinkList();
+      if (!result) return;
+
+      const incoming = mergeEntries(get().urlEntries, result.text, get().maxUrls);
+      set({
+        urlEntries: incoming.entries,
+        validationError: incoming.overLimit
+          ? `导入后共 ${incoming.entries.length} 条，超出上限 ${get().maxUrls}。请删除多余项。`
+          : null,
+        notice: `已从 ${result.path} 导入链接。`,
+      });
+      get().revalidate();
+    } catch (error) {
+      set({ notice: `导入失败：${String(error)}` });
     }
   },
 
@@ -464,10 +520,29 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
           const pdfByKey = new Map(payload.pdfs);
           const appended = payload.outputs.filter((o) => o.appended).length;
 
+          // 内容与上次完全一致的条目：标记为已跳过
+          const unchangedKeys = new Set(payload.unchanged.map((u) => u.key));
+
+          const notes: string[] = [];
+          if (appended > 0) notes.push(`${appended} 份文档已追加到已有文件`);
+          if (unchangedKeys.size > 0) {
+            notes.push(`${unchangedKeys.size} 条链接的内容与上次完全一致，已跳过`);
+          }
+
           return {
             running: false,
-            notice: appended > 0 ? `${appended} 份文档已追加到已有文件。` : state.notice,
+            notice: notes.length > 0 ? `${notes.join("；")}。` : state.notice,
             tasks: state.tasks.map((task) => {
+              if (unchangedKeys.has(task.key)) {
+                return {
+                  ...task,
+                  state: "Skipped" as TaskState,
+                  stateLabel: "已跳过",
+                  step: "内容与上次一致，无需重复抓取",
+                  progress: 1,
+                };
+              }
+
               const files = outputsByKey.get(task.key) ?? [];
               const extraPdf = pdfByKey.get(task.key);
               return {

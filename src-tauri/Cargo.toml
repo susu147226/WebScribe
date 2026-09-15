@@ -1,6 +1,6 @@
 [package]
 name = "webscribe"
-version = "0.1.3"
+version = "0.1.4"
 description = "轻量级网页文档抓取、整理与 Markdown/PDF 转存工具"
 authors = ["云舒眠眠"]
 edition = "2021"

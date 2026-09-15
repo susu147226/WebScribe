@@ -335,7 +335,14 @@ async function main() {
     if (spaResult) {
       check("SPA 页面成功提取", true, "");
       check("SPA 标记为已渲染", spaResult.rendered === true, `rendered=${spaResult.rendered}`);
-      check("提取到 JS 生成的正文", spaResult.markdown.includes("由 JavaScript 渲染的标题"), "");
+      // 页面里的 h1 现在作为文档标题，正文中不再重复它
+      check("JS 生成的 h1 成为文档标题",
+        spaResult.title.includes("由 JavaScript 渲染的标题"),
+        `title=${spaResult.title}`);
+      check("提取到 JS 生成的正文",
+        spaResult.markdown.includes("这段正文只在浏览器中执行脚本后才会出现"), "");
+      check("正文中不重复标题",
+        !spaResult.markdown.includes("由 JavaScript 渲染的标题"), "");
     } else {
       check("SPA 页面成功提取", false,
         `未产出结果；error=${spaError?.errorKind}: ${spaError?.message}`);

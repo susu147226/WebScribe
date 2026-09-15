@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::document::{self, PageDocument};
 use crate::error::{CrawlError, CrawlErrorKind, Result};
+use crate::merge::content_fingerprint;
 use crate::naming::{sanitize_stem, unique_path};
 use crate::protocol::{CrawlOptions, ImageStrategy};
 
@@ -40,6 +41,8 @@ pub struct CrawlRun {
     pages: BTreeMap<String, BTreeMap<u32, PageDocument>>,
     /// 需要追加的目标：文档分组 → 既有文件路径。
     append_targets: HashMap<String, PathBuf>,
+    /// 上次抓取时各链接的内容指纹，用于判断内容是否变过。
+    known_fingerprints: HashMap<String, String>,
     /// 本次任务是否启用了「相似链接合并为同一文档」。
     /// 关闭时不读写合并记录，避免污染下次启用的任务。
     pub merge_enabled: bool,
@@ -79,6 +82,18 @@ pub struct WriteOutcome {
     pub files: Vec<OutputFile>,
     #[serde(skip)]
     pub pdf_jobs: Vec<PdfJob>,
+    /// 本次抓取到的内容指纹（key → 指纹），供记录持久化。
+    #[serde(skip)]
+    pub fingerprints: Vec<(String, String)>,
+    /// 因内容与上次完全一致而跳过的条目。
+    pub unchanged: Vec<UnchangedEntry>,
+}
+
+/// 因内容无变化而跳过的条目。
+#[derive(Debug, Clone, Serialize)]
+pub struct UnchangedEntry {
+    pub key: String,
+    pub title: String,
 }
 
 /// 一份待渲染的 PDF。
@@ -100,6 +115,7 @@ impl CrawlRun {
         staging_dir: PathBuf,
         group_by_key: HashMap<String, String>,
         append_targets: HashMap<String, PathBuf>,
+        known_fingerprints: HashMap<String, String>,
     ) -> Self {
         Self {
             id,
@@ -111,6 +127,7 @@ impl CrawlRun {
             group_order: Vec::new(),
             pages: BTreeMap::new(),
             append_targets,
+            known_fingerprints,
             merge_enabled: false,
             failures: Vec::new(),
         }
@@ -167,40 +184,63 @@ impl CrawlRun {
     ///
     /// 同一文档分组的所有页面合并为一份；命中合并记录且文件仍在时追加到该文件。
     /// 开启「独立输出」时改为每个 URL 一份文档。
+    ///
+    /// 内容指纹与上次完全一致的条目会被跳过，不再重复写入或追加。
     pub fn write_outputs(&self) -> Result<WriteOutcome> {
         let mut files = Vec::new();
         let mut pdf_jobs = Vec::new();
+        let mut fingerprints = Vec::new();
+        let mut unchanged = Vec::new();
 
         for group in &self.group_order {
             let Some(keys) = self.group_keys.get(group) else {
                 continue;
             };
 
-            if self.options.separate_output {
-                for key in keys {
-                    let Some(pages) = self.pages.get(key) else {
-                        continue;
-                    };
-                    if pages.is_empty() {
-                        continue;
-                    }
-                    let ordered: Vec<PageDocument> = pages.values().cloned().collect();
-                    let title = ordered[0].title.clone();
-                    let content = document::join(&ordered);
+            // 逐个链接判断内容是否变过；未变的整条跳过
+            let mut fresh: Vec<(String, Vec<PageDocument>)> = Vec::new();
+            for key in keys {
+                let Some(pages) = self.pages.get(key) else {
+                    continue;
+                };
+                if pages.is_empty() {
+                    continue;
+                }
 
+                let ordered: Vec<PageDocument> = pages.values().cloned().collect();
+                let fingerprint = fingerprint_of(&ordered);
+                fingerprints.push((key.clone(), fingerprint.clone()));
+
+                if self.known_fingerprints.get(key) == Some(&fingerprint) {
+                    unchanged.push(UnchangedEntry {
+                        key: key.clone(),
+                        title: ordered[0].title.clone(),
+                    });
+                    continue;
+                }
+
+                fresh.push((key.clone(), ordered));
+            }
+
+            if fresh.is_empty() {
+                continue;
+            }
+
+            if self.options.separate_output {
+                for (key, ordered) in &fresh {
+                    let title = ordered[0].title.clone();
+                    let content = document::join(ordered);
                     let (file, job) = self.write_one(key, group, &title, &content, false)?;
                     files.push(file);
                     pdf_jobs.extend(job);
                 }
             } else {
-                let ordered = self.ordered_pages(keys);
-                if ordered.is_empty() {
-                    continue;
-                }
+                let ordered: Vec<PageDocument> =
+                    fresh.iter().flat_map(|(_, pages)| pages.iter().cloned()).collect();
 
                 let title = ordered[0].title.clone();
                 let content = document::join(&ordered);
-                let key = keys.first().cloned().unwrap_or_default();
+                let key = fresh.first().map(|(k, _)| k.clone()).unwrap_or_default();
 
                 // 分组有既有文件时才走追加
                 let append = self.append_targets.contains_key(group);
@@ -210,18 +250,12 @@ impl CrawlRun {
             }
         }
 
-        Ok(WriteOutcome { files, pdf_jobs })
-    }
-
-    /// 按「先 URL 顺序、后页码顺序」取出分组内的全部页面。
-    fn ordered_pages(&self, keys: &[String]) -> Vec<PageDocument> {
-        let mut out = Vec::new();
-        for key in keys {
-            if let Some(pages) = self.pages.get(key) {
-                out.extend(pages.values().cloned());
-            }
-        }
-        out
+        Ok(WriteOutcome {
+            files,
+            pdf_jobs,
+            fingerprints,
+            unchanged,
+        })
     }
 
     /// 写出一份文档，返回文件记录与（可选的）PDF 任务。
@@ -422,6 +456,20 @@ impl CrawlRun {
     }
 }
 
+/// 一个链接（含其分页）的内容指纹。
+///
+/// 取标题与各页正文拼接后的指纹：同一链接若再次抓取到的内容完全相同，
+/// 指纹不变，即可判定「已爬取过、内容无差别」。
+fn fingerprint_of(pages: &[PageDocument]) -> String {
+    let title = pages.first().map(|p| p.title.as_str()).unwrap_or_default();
+    let joined: String = pages
+        .iter()
+        .map(|p| p.body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    content_fingerprint(title, &joined)
+}
+
 /// 把新内容追加到既有文档末尾，以分隔线隔开。
 ///
 /// 既有内容为空（例如文件被清空）时直接返回新内容，避免产出一个以 `---`
@@ -531,6 +579,7 @@ mod tests {
             dir.to_path_buf(),
             group_by_key,
             append_targets,
+            HashMap::new(),
         )
     }
 
@@ -760,6 +809,7 @@ mod tests {
             staging.clone(),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
 
         let body = run
@@ -784,6 +834,7 @@ mod tests {
             out_dir.clone(),
             options(OutputFormat::Markdown, ImageStrategy::Local, false),
             dir.join("staging"),
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
         );
@@ -914,4 +965,172 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---- 内容无变化则跳过 ----
+
+    /// 构造一个带已知指纹的 CrawlRun。
+    fn run_with_known(
+        dir: &Path,
+        known: HashMap<String, String>,
+    ) -> CrawlRun {
+        CrawlRun::new(
+            "t1".into(),
+            dir.to_path_buf(),
+            options(OutputFormat::Markdown, ImageStrategy::Remote, false),
+            dir.to_path_buf(),
+            own_groups(&["k1"]),
+            HashMap::new(),
+            known,
+        )
+    }
+
+    #[test]
+    fn 首次抓取不会跳过任何条目() {
+        let dir = temp_dir("skip-first");
+        let mut run = run_with_known(&dir, HashMap::new());
+        run.record_page("k1", 0, "标题".into(), "https://e.com/a".into(), "正文".into(), "2026-09-15 10:00:00".into());
+
+        let outcome = run.write_outputs().unwrap();
+        assert_eq!(outcome.files.len(), 1);
+        assert!(outcome.unchanged.is_empty());
+        assert_eq!(outcome.fingerprints.len(), 1, "应记录内容指纹");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 内容与上次完全一致时跳过且不重写文件() {
+        let dir = temp_dir("skip-same");
+
+        // 先跑一次，拿到指纹
+        let mut first = run_with_known(&dir, HashMap::new());
+        first.record_page("k1", 0, "标题".into(), "https://e.com/a".into(), "正文".into(), "2026-09-15 10:00:00".into());
+        let first_outcome = first.write_outputs().unwrap();
+        let known: HashMap<String, String> = first_outcome.fingerprints.iter().cloned().collect();
+
+        let written = first_outcome.files[0].markdown_path.clone().unwrap();
+        let before = std::fs::read_to_string(&written).unwrap();
+
+        // 再跑一次，内容一模一样
+        let mut second = run_with_known(&dir, known);
+        second.record_page("k1", 0, "标题".into(), "https://e.com/a".into(), "正文".into(), "2026-09-15 11:00:00".into());
+        let outcome = second.write_outputs().unwrap();
+
+        assert!(outcome.files.is_empty(), "内容无变化时不应再写文件");
+        assert_eq!(outcome.unchanged.len(), 1);
+        assert_eq!(outcome.unchanged[0].key, "k1");
+        assert_eq!(std::fs::read_to_string(&written).unwrap(), before, "既有文件不应被改动");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 内容有变化时不跳过() {
+        let dir = temp_dir("skip-changed");
+
+        let mut first = run_with_known(&dir, HashMap::new());
+        first.record_page("k1", 0, "标题".into(), "https://e.com/a".into(), "旧正文".into(), "2026-09-15 10:00:00".into());
+        let known: HashMap<String, String> =
+            first.write_outputs().unwrap().fingerprints.iter().cloned().collect();
+
+        let mut second = run_with_known(&dir, known);
+        second.record_page("k1", 0, "标题".into(), "https://e.com/a".into(), "新正文".into(), "2026-09-15 11:00:00".into());
+        let outcome = second.write_outputs().unwrap();
+
+        assert_eq!(outcome.files.len(), 1, "内容变了就应当重新写出");
+        assert!(outcome.unchanged.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 标题变化也算内容变化() {
+        let dir = temp_dir("skip-title");
+
+        let mut first = run_with_known(&dir, HashMap::new());
+        first.record_page("k1", 0, "旧标题".into(), "https://e.com/a".into(), "正文".into(), "2026-09-15 10:00:00".into());
+        let known: HashMap<String, String> =
+            first.write_outputs().unwrap().fingerprints.iter().cloned().collect();
+
+        let mut second = run_with_known(&dir, known);
+        second.record_page("k1", 0, "新标题".into(), "https://e.com/a".into(), "正文".into(), "2026-09-15 11:00:00".into());
+
+        assert_eq!(second.write_outputs().unwrap().files.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 抓取时间变化不算内容变化() {
+        let dir = temp_dir("skip-time");
+
+        let mut first = run_with_known(&dir, HashMap::new());
+        first.record_page("k1", 0, "标题".into(), "https://e.com/a".into(), "正文".into(), "2026-09-15 10:00:00".into());
+        let known: HashMap<String, String> =
+            first.write_outputs().unwrap().fingerprints.iter().cloned().collect();
+
+        // 只有爬取时间不同，正文与标题一致 —— 应当仍然跳过
+        let mut second = run_with_known(&dir, known);
+        second.record_page("k1", 0, "标题".into(), "https://e.com/a".into(), "正文".into(), "2026-09-16 09:00:00".into());
+
+        let outcome = second.write_outputs().unwrap();
+        assert!(outcome.files.is_empty(), "爬取时间不属于内容，不应触发重新写出");
+        assert_eq!(outcome.unchanged.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 部分条目无变化时只写出变化的那部分() {
+        let dir = temp_dir("skip-partial");
+        let mut groups = HashMap::new();
+        groups.insert("k1".to_string(), "example.com/docs".to_string());
+        groups.insert("k2".to_string(), "example.com/docs".to_string());
+
+        let mut first = CrawlRun::new("t".into(), dir.clone(),
+            options(OutputFormat::Markdown, ImageStrategy::Remote, false),
+            dir.clone(), groups.clone(), HashMap::new(), HashMap::new());
+        first.record_page("k1", 0, "第一章".into(), "https://example.com/docs/a".into(), "甲".into(), "2026-09-15 10:00:00".into());
+        first.record_page("k2", 0, "第二章".into(), "https://example.com/docs/b".into(), "乙".into(), "2026-09-15 10:00:10".into());
+        let known: HashMap<String, String> =
+            first.write_outputs().unwrap().fingerprints.iter().cloned().collect();
+
+        // k1 未变，k2 变了
+        let mut second = CrawlRun::new("t".into(), dir.clone(),
+            options(OutputFormat::Markdown, ImageStrategy::Remote, false),
+            dir.clone(), groups, HashMap::new(), known);
+        second.record_page("k1", 0, "第一章".into(), "https://example.com/docs/a".into(), "甲".into(), "2026-09-16 10:00:00".into());
+        second.record_page("k2", 0, "第二章".into(), "https://example.com/docs/b".into(), "乙改".into(), "2026-09-16 10:00:10".into());
+
+        let outcome = second.write_outputs().unwrap();
+        assert_eq!(outcome.files.len(), 1);
+        assert_eq!(outcome.unchanged.len(), 1);
+        assert_eq!(outcome.unchanged[0].key, "k1");
+
+        // 写出的文档只应含变化的那条
+        let content = std::fs::read_to_string(outcome.files[0].markdown_path.as_ref().unwrap()).unwrap();
+        assert!(content.contains("乙改"));
+        assert!(!content.contains("第一章"), "未变化的条目不应被重复写入");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 指纹对相同内容稳定_对不同内容相异() {
+        let page = |t: &str, b: &str| PageDocument {
+            title: t.into(),
+            source_url: "https://e.com/a".into(),
+            crawled_at: "2026-09-15 10:00:00".into(),
+            body: b.into(),
+        };
+
+        let a = fingerprint_of(&[page("标题", "正文")]);
+        let b = fingerprint_of(&[page("标题", "正文")]);
+        assert_eq!(a, b, "相同内容应得到相同指纹");
+
+        assert_ne!(a, fingerprint_of(&[page("标题", "正文改")]));
+        assert_ne!(a, fingerprint_of(&[page("标题改", "正文")]));
+        assert_ne!(a, fingerprint_of(&[page("标题", "正文"), page("标题", "续")]));
+    }
 }
+

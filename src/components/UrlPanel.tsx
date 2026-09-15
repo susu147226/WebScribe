@@ -162,23 +162,38 @@ export function UrlPanel() {
           aria-label="粘贴链接"
         />
 
-        <div className="row row--between paste-actions">
-          <div className="row">
-            <button onClick={() => absorb(store.pasteInput)} disabled={!store.pasteInput.trim()}>
-              添加
-            </button>
-            <button
-              className="ghost"
-              onClick={store.addBlankEntry}
-              disabled={entries.length >= store.maxUrls}
-            >
-              加一行
-            </button>
-            <button className="ghost" onClick={store.clearEntries} disabled={entries.length === 0}>
-              清空
-            </button>
-          </div>
+        <div className="row row--wrap paste-actions">
+          <button onClick={() => absorb(store.pasteInput)} disabled={!store.pasteInput.trim()}>
+            添加
+          </button>
+          <button
+            className="ghost"
+            onClick={store.addBlankEntry}
+            disabled={entries.length >= store.maxUrls}
+          >
+            加一行
+          </button>
+          <button
+            className="ghost"
+            onClick={() => void store.exportLinks()}
+            disabled={entries.length === 0}
+            title="把当前链接列表保存为文本文件"
+          >
+            导出
+          </button>
+          <button
+            className="ghost"
+            onClick={() => void store.importLinks()}
+            title="从文本文件读入链接列表"
+          >
+            导入
+          </button>
+          <button className="ghost" onClick={store.clearEntries} disabled={entries.length === 0}>
+            清空
+          </button>
+        </div>
 
+        <div className="row row--between paste-actions">
           <label className="tier">
             <span className="section__hint">上限</span>
             <select
@@ -193,18 +208,19 @@ export function UrlPanel() {
               ))}
             </select>
           </label>
-        </div>
 
-        <div className="row row--between paste-actions">
           <span className={overLimit ? "section__hint section__hint--over" : "section__hint"}>
             {validCount} / {store.maxUrls} 条可用
           </span>
-          {minSeconds > 1 && (
-            <span className="section__hint" title="同一站点串行抓取，每次请求间隔至少 1 秒">
-              同站最多 {Math.round(minSeconds)} 条 · 预计至少 {minSeconds} 秒
-            </span>
-          )}
         </div>
+
+        {minSeconds > 1 && (
+          <div className="paste-actions">
+            <span className="section__hint" title="同一站点串行抓取，每次请求间隔至少 1 秒">
+              同一站点最多 {Math.round(minSeconds)} 条 · 预计至少 {minSeconds} 秒
+            </span>
+          </div>
+        )}
       </div>
 
       {/* ---------- 中部：独立滚动 ---------- */}

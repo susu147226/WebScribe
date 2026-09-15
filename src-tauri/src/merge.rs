@@ -18,6 +18,10 @@ pub struct MergeRecord {
     /// 记录格式版本，便于日后迁移。
     pub version: u32,
     pub groups: HashMap<String, MergeEntry>,
+    /// 每个链接上次抓取到的内容指纹，用于「内容无变化就跳过」。
+    /// 旧版本记录里没有这一节，读取时按空处理。
+    #[serde(default)]
+    pub pages: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,8 +42,25 @@ impl Default for MergeRecord {
         Self {
             version: CURRENT_VERSION,
             groups: HashMap::new(),
+            pages: HashMap::new(),
         }
     }
+}
+
+/// 内容指纹。
+///
+/// 用 FNV-1a 而非 `DefaultHasher`：后者不保证跨进程、跨版本稳定，不能用于
+/// 持久化比对。这里只需判断「内容是否变过」，64 位足够。
+pub fn content_fingerprint(title: &str, markdown: &str) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = OFFSET;
+    for byte in title.as_bytes().iter().chain(b"\n").chain(markdown.as_bytes()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 impl MergeRecord {
@@ -90,13 +111,24 @@ impl MergeRecord {
         );
     }
 
-    /// 清除全部记录，之后所有任务都会新建文档。
+    /// 清除全部记录，之后所有任务都会新建文档、也不再跳过任何页面。
     pub fn clear(&mut self) {
         self.groups.clear();
+        self.pages.clear();
     }
 
     pub fn is_empty(&self) -> bool {
-        self.groups.is_empty()
+        self.groups.is_empty() && self.pages.is_empty()
+    }
+
+    /// 上次抓取该链接时的内容指纹。
+    pub fn fingerprint_of(&self, key: &str) -> Option<&str> {
+        self.pages.get(key).map(String::as_str)
+    }
+
+    /// 记录本次抓取到的内容指纹。
+    pub fn remember_fingerprint(&mut self, key: &str, fingerprint: &str) {
+        self.pages.insert(key.to_string(), fingerprint.to_string());
     }
 }
 

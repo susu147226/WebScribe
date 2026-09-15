@@ -64,6 +64,7 @@
 
 - 粘贴区支持一次粘贴多个链接，自动拆分为独立条目
 - **一行里挤了多个链接也会被正确拆开**，不会连成一个畸形地址
+- **自动记住上次的链接列表**，下次启动自动恢复；也可「导出」为文本文件、需要时「导入」
 - 每条链接独占一行，横向滚动显示完整地址，悬停可看全文
 - 逐条实时校验：格式错误、尚未填写、与第几条重复，就地以徽章标出（悬停看原因）
 - **按文档分组合并展示**：同属一份文档的链接收在一个可折叠的分组里，
@@ -90,6 +91,9 @@
 
 **输出**
 
+- **标题取自页面自身**：优先用文档里的标题（h1），而不是网页 `<title>`。
+  文档站的 `<title>` 常常每页都是同一串（如 `OPPO 开放平台-OPPO开发者服务中心`），
+  用它会导致所有文档标题相同
 - Markdown 保留 H1–H6、段落、粗体、斜体、链接、图片、有序/无序列表、表格、引用、行内代码、代码块
 - **表头行用 `<td>` 的表格也能正确转为 Markdown 表格**（不少文档站这么写）
 - **代码块不会被丢弃**：装饰性容器包裹、`pre > ol > li` 逐行、highlight.js 着色等写法都能还原为围栏代码块
@@ -97,7 +101,7 @@
 - 图片可保留远程链接，或下载到同名 `.assets` 目录实现离线存档
 - 同站长文自动续页（默认关闭，上限 5 页）
 
-**文档合并**
+**文档合并与去重**
 
 - 同一目录下的多个链接视为同一套文档的不同章节，**合并为一份文档**
 - 判定规则：同主机 + 路径去掉最后一段后相同。例如
@@ -109,7 +113,10 @@
   ```
 
 - **跨任务追加**：下次抓取相似链接时，若上次的文档仍在，新内容会**追加到该文件末尾**，而不是另建一份
-- 可在界面上关闭合并，或一键清除合并记录
+- **内容无变化则跳过**：再次抓取同一链接时，若抓到的正文与上次完全一致，
+  判定为已爬取过并跳过，不再重复写入或追加；界面上显示为「已跳过」，
+  汇总提示共跳过多少条
+- 可在界面上关闭合并，或一键清除本地记录（清除后不再追加、也不再跳过）
 
 ---
 
@@ -140,20 +147,25 @@ WebScribe/
 │   ├── icons/               应用图标
 │   └── tauri.conf.json
 ├── crawler/                 抓取 sidecar（Node.js + TypeScript）
-│   └── src/
-│       ├── http/            HTTP First 抓取
-│       ├── browser/         Playwright 会话与登录
-│       ├── extractor/       Readability 正文提取与正文预处理
-│       ├── markdown/        Turndown 转换、表格归一化、图片处理
-│       ├── pdf/             Markdown → HTML → PDF
-│       ├── domain/          robots.txt、防护检测
-│       ├── task/            调度、退避、多页发现
-│       ├── auth.ts          登录态读取与匹配
-│       ├── errors.ts        错误归一
-│       └── index.ts         NDJSON IPC 入口
+│   ├── src/
+│   │   ├── http/            HTTP First 抓取
+│   │   ├── browser/         Playwright 会话与登录
+│   │   ├── extractor/       Readability 正文提取与正文预处理
+│   │   ├── markdown/        Turndown 转换、表格归一化、图片处理
+│   │   ├── pdf/             Markdown → HTML → PDF
+│   │   ├── domain/          robots.txt、防护检测
+│   │   ├── task/            调度、退避、多页发现
+│   │   ├── auth.ts          登录态读取与匹配
+│   │   ├── errors.ts        错误归一
+│   │   └── index.ts         NDJSON IPC 入口
+│   └── tools/               排查用的小工具
+│       ├── title-check.mjs       检查文档站的标题是否被误取成站点名
+│       ├── dom-probe.mjs         查看页面渲染后标题的标记方式
+│       └── readability-probe.mjs 查看 Readability 对标题的处理
 ├── tests/
 │   ├── unit/                前端单元测试
-│   └── integration/         端到端测试与本地 fixture 服务器
+│   ├── integration/         端到端测试与本地 fixture 服务器
+│   └── benchmark/           链接数量与页面体量的压测脚本
 ├── scripts/                 构建脚本（PowerShell）
 ├── runtime/                 Node 与 Chromium（不入 Git，由脚本生成）
 ├── LICENSE                  许可证
@@ -313,8 +325,9 @@ WebScribe 不设数据库、不上传任何数据。它在本机保留两类文�
 | 路径 | 内容 | 说明 |
 |---|---|---|
 | `%APPDATA%\com.webscribe.app\auth\` | 登录态 | 您主动登录后保存，可随时删除 |
-| `%APPDATA%\com.webscribe.app\merge-records.json` | 合并记录 | 记录「文档分组 → 上次产出的文件」，用于判断下次是追加还是新建；可在界面上清除 |
-| `%APPDATA%\com.webscribe.app\logs\` | 结构化日志 | 记录任务起止、错误类型等，已脱敏 |
+| `%APPDATA%\com.webscribe.app\merge-records.json` | 合并记录与内容指纹 | 记录「文档分组 → 上次产出的文件」以及各链接的内容指纹，用于判断下次是追加还是新建、内容是否变过；可在界面上清除 |
+| `%APPDATA%\com.webscribe.app\link-list.txt` | 上次的链接列表 | 启动时自动恢复；清空列表后该文件也会被清空 |
+| `%APPDATA%\com.webscribe.app\logs\` | 结构化日志 | 记录启动版本、任务起止、错误类型等，已脱敏 |
 
 删除 `%APPDATA%\com.webscribe.app\` 即可完全清除用户数据。
 

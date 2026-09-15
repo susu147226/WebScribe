@@ -43,6 +43,10 @@ pub fn run() {
             commands::start_crawl,
             commands::open_login,
             commands::clear_merge_records,
+            commands::save_link_list,
+            commands::load_link_list,
+            commands::write_text_file,
+            commands::read_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("WebScribe 启动失败");

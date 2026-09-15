@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type {
   CrawlRequest,
@@ -32,12 +32,51 @@ export function openLogin(url: string): Promise<void> {
 }
 
 /**
- * 清除合并记录。之后所有任务都会新建文档，不再追加到既有文件。
+ * 清除合并记录。之后所有任务都会新建文档，也不再跳过任何页面。
  *
  * @returns 被清除的记录条数
  */
 export function clearMergeRecords(): Promise<number> {
   return invoke<number>("clear_merge_records");
+}
+
+/** 记住当前链接列表，下次启动自动恢复。 */
+export function saveLinkList(urls: string[]): Promise<void> {
+  return invoke<void>("save_link_list", { urls });
+}
+
+/** 读取上次记住的链接列表。 */
+export function loadLinkList(): Promise<string[]> {
+  return invoke<string[]>("load_link_list");
+}
+
+/** 把当前链接列表导出为文本文件。用户取消时返回 null。 */
+export async function exportLinkList(urls: string[]): Promise<string | null> {
+  const target = await save({
+    title: "导出链接列表",
+    defaultPath: "websribe-links.txt",
+    filters: [{ name: "文本文件", extensions: ["txt"] }],
+  });
+  if (target === null) return null;
+
+  await invoke<void>("write_text_file", { path: target, contents: urls.join("\n") });
+  return target;
+}
+
+/** 从文本文件导入链接列表。用户取消时返回 null。 */
+export async function importLinkList(): Promise<{ path: string; text: string } | null> {
+  const selected = await open({
+    title: "导入链接列表",
+    multiple: false,
+    filters: [{ name: "文本文件", extensions: ["txt"] }],
+  });
+  if (selected === null) return null;
+
+  const path = Array.isArray(selected) ? selected[0] : selected;
+  if (!path) return null;
+
+  const text = await invoke<string>("read_text_file", { path });
+  return { path, text };
 }
 
 /**

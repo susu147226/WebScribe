@@ -307,18 +307,94 @@ fn merge_record_path(paths: &RuntimePaths) -> PathBuf {
     paths.data_dir.join("merge-records.json")
 }
 
+/// 链接列表的自动存档路径。
+fn link_list_path(paths: &RuntimePaths) -> PathBuf {
+    paths.data_dir.join("link-list.txt")
+}
+
+/// 记住当前链接列表，下次启动时恢复，免去重新输入。
+///
+/// 只写一个文本文件，因此不经过 crawler —— 没必要为了存盘把抓取进程拉起来。
+#[tauri::command]
+pub async fn save_link_list(
+    app: AppHandle,
+    urls: Vec<String>,
+) -> std::result::Result<(), String> {
+    let paths = RuntimePaths::resolve(&app).map_err(|e| e.message_with_detail())?;
+    let path = link_list_path(&paths);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+    }
+
+    // 空列表也要落盘：用户清空后重启不应又冒出旧内容
+    std::fs::write(&path, urls.join("\n")).map_err(|e| format!("保存链接列表失败：{e}"))
+}
+
+/// 读取上次记住的链接列表。文件不存在时返回空列表。
+#[tauri::command]
+pub async fn load_link_list(app: AppHandle) -> std::result::Result<Vec<String>, String> {
+    let paths = RuntimePaths::resolve(&app).map_err(|e| e.message_with_detail())?;
+    let path = link_list_path(&paths);
+
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Vec::new());
+    };
+
+    Ok(text
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+/// 把文本写入用户选定的文件。
+///
+/// 路径来自前端弹出的系统保存对话框，即用户亲自选定的位置。
+#[tauri::command]
+pub fn write_text_file(path: String, contents: String) -> std::result::Result<(), String> {
+    let path = PathBuf::from(path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("未指定文件路径".into());
+    }
+    std::fs::write(&path, contents).map_err(|e| format!("写入 {} 失败：{e}", path.display()))
+}
+
+/// 读取用户选定的文本文件。
+#[tauri::command]
+pub fn read_text_file(path: String, max_bytes: Option<usize>) -> std::result::Result<String, String> {
+    let path = PathBuf::from(path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("未指定文件路径".into());
+    }
+
+    let limit = max_bytes.unwrap_or(4 * 1024 * 1024);
+    let meta = std::fs::metadata(&path).map_err(|e| format!("无法读取 {}：{e}", path.display()))?;
+    if meta.len() as usize > limit {
+        return Err(format!(
+            "文件过大（{} 字节，上限 {limit} 字节）",
+            meta.len()
+        ));
+    }
+
+    std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))
+}
+
 /// 清除合并记录。之后所有任务都会新建文档。
 #[tauri::command]
 pub async fn clear_merge_records(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> std::result::Result<u32, String> {
-    let sidecar = state.sidecar().await.map_err(|e| e.message_with_detail())?;
-    let path = merge_record_path(sidecar.paths());
+    let paths = RuntimePaths::resolve(&app).map_err(|e| e.message_with_detail())?;
+    let path = merge_record_path(&paths);
 
     let mut record = MergeRecord::load(&path);
-    let cleared = record.groups.len() as u32;
+    let cleared = (record.groups.len() + record.pages.len()) as u32;
     record.clear();
-    record.save(&path).map_err(|e| format!("清除合并记录失败：{e}"))?;
+    record
+        .save(&path)
+        .map_err(|e| format!("清除合并记录失败：{e}"))?;
 
     state.log(LogEntry::new("merge-records-cleared").state(cleared.to_string()));
     Ok(cleared)
@@ -378,15 +454,25 @@ async fn start_crawl_inner(
         });
     }
 
-    // 命中合并记录、且上次的文件仍在时，本次改为追加到该文件
+    // 合并记录同时提供两件事：追加目标，以及各链接上次的内容指纹
     let record_path = merge_record_path(&paths);
+    let record = MergeRecord::load(&record_path);
+
     let mut append_targets: HashMap<String, PathBuf> = HashMap::new();
+    let mut known_fingerprints: HashMap<String, String> = HashMap::new();
+
     if request.merge_documents {
-        let record = MergeRecord::load(&record_path);
         for group in group_by_key.values() {
             if let Some(file) = record.existing_file(group) {
                 append_targets.insert(group.clone(), file);
             }
+        }
+    }
+
+    // 内容是否变过与「是否合并」无关：重复抓取同一链接本就应当跳过
+    for entry in &outcome.unique {
+        if let Some(fingerprint) = record.fingerprint_of(&entry.key) {
+            known_fingerprints.insert(entry.key.clone(), fingerprint.to_string());
         }
     }
 
@@ -404,6 +490,7 @@ async fn start_crawl_inner(
         paths.staging_dir.clone(),
         group_by_key,
         append_targets,
+        known_fingerprints,
     );
     let mut run = run;
     run.merge_enabled = request.merge_documents;
@@ -587,26 +674,33 @@ async fn finalize_run(app: &AppHandle, state: &AppState) {
         (outcome, guard.failures.clone(), guard.merge_enabled)
     };
 
-    // 更新合并记录：记住「文档分组 → 产出文件」，供下次任务判断是追加还是新建
-    if merge_enabled {
-        if let Ok(sidecar) = state.sidecar().await {
-            let path = merge_record_path(sidecar.paths());
-            let mut record = MergeRecord::load(&path);
+    // 更新本地记录：
+    // - 内容指纹始终记录（与是否合并无关，用于下次判断内容是否变过）
+    // - 「文档分组 → 产出文件」仅在启用合并时记录
+    if let Ok(sidecar) = state.sidecar().await {
+        let path = merge_record_path(sidecar.paths());
+        let mut record = MergeRecord::load(&path);
 
+        for (key, fingerprint) in &outcome.fingerprints {
+            record.remember_fingerprint(key, fingerprint);
+        }
+
+        if merge_enabled {
             for file in &outcome.files {
                 if let Some(markdown) = &file.markdown_path {
                     record.remember(&file.group, Path::new(markdown), &file.title);
                 }
             }
+        }
 
-            if let Err(e) = record.save(&path) {
-                eprintln!("[WebScribe] 合并记录写入失败：{e}");
-            }
+        if let Err(e) = record.save(&path) {
+            eprintln!("[WebScribe] 本地记录写入失败：{e}");
         }
     }
 
     let outputs = outcome.files;
     let pdf_jobs = outcome.pdf_jobs;
+    let unchanged = outcome.unchanged;
 
     let mut pdf_results = Vec::new();
     for job in pdf_jobs {
@@ -638,15 +732,17 @@ async fn finalize_run(app: &AppHandle, state: &AppState) {
             "outputs": outputs,
             "failures": failures,
             "pdfs": pdf_results,
+            "unchanged": &unchanged,
         }),
     );
 
     state.log(
         LogEntry::new("crawl-finished").state(format!(
-            "写出 {} 个文件，{} 个失败，{} 个 PDF",
+            "写出 {} 个文件，{} 个失败，{} 个 PDF，{} 个内容无变化已跳过",
             outputs.len(),
             failures.len(),
-            pdf_results.len()
+            pdf_results.len(),
+            unchanged.len()
         )),
     );
 }

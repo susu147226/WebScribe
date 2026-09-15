@@ -103,6 +103,54 @@ export function stripDuplicateLeadingHeading(
 }
 
 /**
+ * 取正文开头的标题元素——通常就是这篇文章自己的标题。
+ *
+ * **为什么优先用它而不是 `article.title`：** Readability 的 `title` 取自网页的
+ * `<title>` 标签，而文档站普遍在 `<title>` 里拼上一段栏目后缀。例如某 HarmonyOS
+ * 文档页的 `<title>` 是
+ *
+ *   变量：全局变量<GlobalVariable>-基础功能-HarmonyOS 5.0及以上版本主题引擎规范-...
+ *
+ * 每页都拖着同一段后缀，用作文档标题与文件名时看起来全都一样。而正文里的标题
+ * （h1）才是这一页真正的名字：`变量：全局变量<GlobalVariable>`。
+ *
+ * 仅当标题出现在正文开头时才采用 —— 若它之前已经有段落、列表或表格，说明那只是
+ * 一个小节标题，不足以代表整篇文档。
+ */
+export function leadingHeadingText(contentHtml: string): string {
+  const match = contentHtml.match(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/i);
+  if (!match || match.index === undefined) return "";
+
+  const before = contentHtml.slice(0, match.index);
+  if (/<(p|ul|ol|table|pre|blockquote)\b/i.test(before)) return "";
+
+  return match[2]
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * 取页面自己的标题——文档中的 `<h1>`。
+ *
+ * **为什么必须在 Readability 之前取：** 不少文档站（OPPO、vivo 的开放平台等）把
+ * 每个页面的 `<title>` 都写成站点级的固定文案，例如每一页都是
+ * `OPPO 开放平台-OPPO开发者服务中心`；页面真正的名字在正文的 `<h1>` 里。
+ *
+ * 而 Readability 的 `_headerDuplicatesTitle` 会用 0.75 的文本相似度阈值判断
+ * 「这个标题与文章标题重复」，把这类 h1 一并删除——`OPPO开发者服务协议` 与
+ * `OPPO 开放平台-OPPO开发者服务中心` 因共享 `OPPO`、`开发者` 等词而被误判。
+ * 等到 Readability 之后再找，页面标题已经没了。
+ */
+function documentHeading(document: Document): string {
+  for (const h1 of Array.from(document.querySelectorAll("h1"))) {
+    const text = (h1.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (text.length > 0) return text;
+  }
+  return "";
+}
+
+/**
  * 从 HTML 中提取正文。
  *
  * @param html 原始 HTML
@@ -126,6 +174,7 @@ export function extractContent(html: string, url: string): ExtractedContent | nu
   }
 
   const documentTitle = dom.window.document.title ?? "";
+  const headingTitle = documentHeading(dom.window.document);
 
   // 必须在 Readability 之前：拆掉包裹代码块的装饰性 div（否则 Readability 会
   // 连同其中的 <pre> 一并删除），并把代码规范化为 pre > code
@@ -147,7 +196,7 @@ export function extractContent(html: string, url: string): ExtractedContent | nu
     return null;
   }
 
-  const title = (article.title ?? "").trim() || documentTitle.trim();
+  const title = resolveArticleTitle(article, headingTitle, documentTitle);
   const contentHtml = stripDuplicateLeadingHeading(article.content ?? "", [
     title,
     documentTitle,
@@ -162,6 +211,36 @@ export function extractContent(html: string, url: string): ExtractedContent | nu
     siteName: article.siteName ?? null,
     documentTitle: documentTitle.trim(),
   };
+}
+
+/**
+ * 决定文档标题。
+ *
+ * 优先级：
+ *
+ * 1. **页面自己的 `<h1>`** —— 文档站里每页真正不同的名字
+ * 2. **提取后正文开头的标题** —— 页面没有 h1，但文章以小标题开头时
+ * 3. Readability 从 `<title>` 推出的标题
+ * 4. `<title>` 本身
+ *
+ * 后两者在文档站上往往是站点级固定文案，因此排在最后。
+ */
+function resolveArticleTitle(
+  article: NonNullable<ReturnType<Readability["parse"]>>,
+  documentHeadingTitle: string,
+  documentTitle: string,
+): string {
+  const candidates = [
+    documentHeadingTitle,
+    leadingHeadingText(article.content ?? ""),
+    (article.title ?? "").trim(),
+    documentTitle.trim(),
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && candidate.trim().length > 0) return candidate.trim();
+  }
+  return "";
 }
 
 /** 判断提取结果是否达到「正文充分」的标准。 */
