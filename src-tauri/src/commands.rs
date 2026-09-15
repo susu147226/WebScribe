@@ -48,7 +48,7 @@ impl AppState {
     }
 
     /// 写一条日志。日志未初始化或写入失败都不应影响主流程。
-    fn log(&self, entry: LogEntry) {
+    pub fn log(&self, entry: LogEntry) {
         if let Some(logger) = self.logger.get() {
             let _ = logger.write(&entry);
         }
