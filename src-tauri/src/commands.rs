@@ -129,7 +129,8 @@ pub struct UrlValidation {
 /// 超出上限时仍返回全部行的校验结果，只把限制说明放进 `error` —— 界面需要
 /// 让用户看到究竟哪几行有问题，而不是整批失败、无从下手。
 #[tauri::command]
-pub fn validate_urls(urls: Vec<String>) -> UrlValidation {
+pub fn validate_urls(urls: Vec<String>, max_urls: usize) -> UrlValidation {
+    let limit = url::clamp_link_limit(max_urls);
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut checks = Vec::with_capacity(urls.len());
     let mut unique_count = 0usize;
@@ -187,10 +188,9 @@ pub fn validate_urls(urls: Vec<String>) -> UrlValidation {
         }
     }
 
-    let error = if unique_count > url::MAX_URLS {
+    let error = if unique_count > limit {
         Some(format!(
-            "一次任务最多 {} 个 URL，当前有效条目有 {} 个。请删除多余项。",
-            url::MAX_URLS, unique_count
+            "本次任务的上限是 {limit} 个链接，当前有效条目有 {unique_count} 个。请删除多余项，或在上方调高上限。"
         ))
     } else {
         None
@@ -218,12 +218,18 @@ pub struct EnvironmentStatus {
     pub log_path: Option<String>,
     /// 当前版本号。取自 Cargo 包版本，界面标题直接展示，避免多处维护。
     pub version: String,
+    /// 可选的链接数量档位。由主程序提供，界面直接渲染，避免两边各写一份而漂移。
+    pub link_limit_tiers: Vec<usize>,
+    /// 默认档位。
+    pub default_link_limit: usize,
 }
 
 #[tauri::command]
 pub fn environment_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> EnvironmentStatus {
     let log_path = state.log_path();
     let version = env!("CARGO_PKG_VERSION").to_string();
+    let link_limit_tiers = url::LINK_LIMIT_TIERS.to_vec();
+    let default_link_limit = url::DEFAULT_LINK_LIMIT;
 
     let Ok(paths) = RuntimePaths::resolve(&app) else {
         return EnvironmentStatus {
@@ -234,6 +240,8 @@ pub fn environment_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> En
             problem: Some("无法解析运行时路径".into()),
             log_path,
             version,
+            link_limit_tiers,
+            default_link_limit,
         };
     };
 
@@ -247,6 +255,8 @@ pub fn environment_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> En
         problem,
         log_path,
         version,
+        link_limit_tiers,
+        default_link_limit,
     }
 }
 
@@ -268,11 +278,18 @@ pub struct CrawlRequest {
     /// 也不会读写合并记录。
     #[serde(default = "default_true")]
     pub merge_documents: bool,
+    /// 本次任务的链接数量上限（档位）。
+    #[serde(default = "default_link_limit")]
+    pub max_urls: usize,
     pub save_dir: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_link_limit() -> usize {
+    url::DEFAULT_LINK_LIMIT
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -324,7 +341,7 @@ async fn start_crawl_inner(
     state: Arc<AppState>,
     request: CrawlRequest,
 ) -> Result<StartOutcome> {
-    let outcome = url::validate_and_dedup(&request.urls)?;
+    let outcome = url::validate_and_dedup(&request.urls, request.max_urls)?;
 
     let options = CrawlOptions {
         format: request.format,
@@ -735,7 +752,7 @@ mod tests {
             "https://example.com/a".into(),
             "https://EXAMPLE.com/a/".into(),
             "https://example.com/b".into(),
-        ]);
+        ], url::DEFAULT_LINK_LIMIT);
 
         assert!(result.error.is_none());
         assert_eq!(result.checks.len(), 3, "每一行都应有一条结果");
@@ -756,7 +773,7 @@ mod tests {
             "https://example.com/a".into(),
             "这不是URL".into(),
             "https://example.com/b".into(),
-        ]);
+        ], url::DEFAULT_LINK_LIMIT);
 
         assert!(result.checks[0].error.is_none());
         assert!(result.checks[1].error.is_some(), "非法行应给出原因");
@@ -766,7 +783,7 @@ mod tests {
 
     #[test]
     fn 空行被标记为尚未填写() {
-        let result = validate_urls(vec!["".into(), "   ".into()]);
+        let result = validate_urls(vec!["".into(), "   ".into()], url::DEFAULT_LINK_LIMIT);
         assert_eq!(result.checks.len(), 2);
         for check in &result.checks {
             assert!(check.error.as_deref().unwrap_or_default().contains("尚未填写"));
@@ -776,28 +793,38 @@ mod tests {
     #[test]
     fn 超出上限时仍返回逐行结果() {
         let urls: Vec<String> = (0..11).map(|i| format!("https://example.com/{i}")).collect();
-        let result = validate_urls(urls);
+        let result = validate_urls(urls, 10);
 
-        // 文档要求不得静默截断：既要给出全局错误，也要保留每一行的结果
+        // 不得静默截断：既要给出全局错误，也要保留每一行的结果供用户逐条处理
         assert!(result.error.is_some());
         assert!(result.error.unwrap().contains("11"));
-        assert_eq!(result.checks.len(), 11, "全部行都应保留以便用户逐条处理");
+        assert_eq!(result.checks.len(), 11, "全部行都应保留");
     }
 
     #[test]
-    fn 恰好十个不报错() {
+    fn 换一个更高的档位即可通过() {
+        let urls: Vec<String> = (0..11).map(|i| format!("https://example.com/{i}")).collect();
+
+        assert!(validate_urls(urls.clone(), 10).error.is_some());
+        assert!(
+            validate_urls(urls, 50).error.is_none(),
+            "11 条在 50 档位下应当通过"
+        );
+    }
+
+    #[test]
+    fn 恰好达到档位不报错() {
         let urls: Vec<String> = (0..10).map(|i| format!("https://example.com/{i}")).collect();
-        let result = validate_urls(urls);
-        assert!(result.error.is_none());
+        assert!(validate_urls(urls, 10).error.is_none());
     }
 
     #[test]
     fn 重复项不计入上限() {
-        // 10 个唯一 + 1 个重复，仍应通过
+        // 10 个唯一 + 1 个重复，在 10 档位下仍应通过
         let mut urls: Vec<String> = (0..10).map(|i| format!("https://example.com/{i}")).collect();
         urls.push("https://example.com/0".into());
 
-        let result = validate_urls(urls);
+        let result = validate_urls(urls, 10);
         assert!(result.error.is_none(), "重复项不应占用名额");
         assert_eq!(result.checks[10].duplicate_of, Some(0));
     }
@@ -807,7 +834,7 @@ mod tests {
         let result = validate_urls(vec![
             "https://example.com/docs/a/chapter-1".into(),
             "https://example.com/docs/a/chapter-2".into(),
-        ]);
+        ], url::DEFAULT_LINK_LIMIT);
 
         let first = result.checks[0].doc_group.clone().unwrap();
         let second = result.checks[1].doc_group.clone().unwrap();

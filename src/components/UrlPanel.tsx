@@ -1,82 +1,145 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
+import {
+  buildLinkGroups,
+  defaultExpandedGroups,
+  estimateMinSeconds,
+  hostOf,
+  problemIndexes,
+} from "../services/linkGroups";
 import { useTaskStore } from "../stores/taskStore";
-import { splitUrls } from "../services/urlInput";
-import { MAX_PAGINATION, MAX_URLS, type UrlCheck } from "../types";
+import { FALLBACK_LINK_LIMIT_TIERS, type UrlCheck } from "../types";
+import { SettingsDialog } from "./SettingsDialog";
 
-/** 单条 URL 的校验状态提示。 */
-function EntryStatus({ check }: { check: UrlCheck | undefined }) {
+/** 单条链接的紧凑状态徽章。详情放在悬停提示里，避免撑高行。 */
+function EntryBadge({ check }: { check: UrlCheck | undefined }) {
   if (!check) {
-    return <span className="url-row__hint">校验中…</span>;
+    return (
+      <span className="link-row__badge link-row__badge--pending" title="校验中…">
+        …
+      </span>
+    );
   }
 
   if (check.error) {
-    return <span className="url-row__hint url-row__hint--error">{check.error}</span>;
+    return (
+      <span className="link-row__badge link-row__badge--error" title={check.error}>
+        !
+      </span>
+    );
   }
 
   if (check.duplicateOf !== null) {
     return (
-      <span className="url-row__hint url-row__hint--warn">
-        与第 {check.duplicateOf + 1} 条重复，将被跳过
+      <span
+        className="link-row__badge link-row__badge--warn"
+        title={`与第 ${check.duplicateOf + 1} 条重复，将被跳过`}
+      >
+        =
       </span>
     );
   }
 
   return (
-    <span className="url-row__hint">
-      将并入 <code>{check.docGroup}</code>
+    <span
+      className="link-row__badge link-row__badge--ok"
+      title={`将并入 ${check.docGroup}`}
+    >
+      ✓
     </span>
   );
 }
 
-/** 左侧面板：URL 条目列表、输出选项、保存位置、登录与开始抓取。 */
+/** 左侧面板：粘贴、链接列表、常驻操作栏。设置项在弹窗里。 */
 export function UrlPanel() {
   const store = useTaskStore();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
 
   const entries = store.urlEntries;
   const checks = store.urlChecks;
 
-  const validCount = useMemo(
-    () => checks.filter((check) => check.error === null && check.duplicateOf === null).length,
-    [checks],
+  const groups = useMemo(() => buildLinkGroups(entries, checks), [entries, checks]);
+  const problems = useMemo(() => problemIndexes(checks), [checks]);
+  const visible = useMemo(
+    () => (store.onlyProblems ? problems : entries.map((_, i) => i)),
+    [store.onlyProblems, problems, entries],
   );
-  const overLimit = validCount > MAX_URLS;
 
-  /** 把一段文本并入条目列表。 */
+  const tiers = store.env?.linkLimitTiers?.length
+    ? store.env.linkLimitTiers
+    : FALLBACK_LINK_LIMIT_TIERS;
+
+  const validCount = checks.filter((c) => c.error === null && c.duplicateOf === null).length;
+  const overLimit = validCount > store.maxUrls;
+  const minSeconds = estimateMinSeconds(groups);
+
+  // 条目变化后，把默认展开状态应用到尚未做过选择的组
+  useEffect(() => {
+    if (entries.length === 0) {
+      store.setGroupsExpanded([]);
+      return;
+    }
+    store.setGroupsExpanded([...defaultExpandedGroups(groups)]);
+    // 仅在分组结构变化时重置，避免用户手动展开后被打回
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groups.map((g) => g.key).join("|"), entries.length > 0]);
+
   const absorb = (text: string) => {
     if (text.trim().length === 0) return;
     store.addFromText(text);
   };
 
+  /** 渲染一条链接。 */
+  const renderRow = (index: number) => (
+    <li className="link-row" key={index}>
+      <span className="link-row__index">{index + 1}</span>
+
+      <input
+        className="link-row__input"
+        type="text"
+        value={entries[index]}
+        onChange={(e) => store.setEntry(index, e.target.value)}
+        placeholder="https://example.com/page"
+        spellCheck={false}
+        title={entries[index]}
+        aria-label={`第 ${index + 1} 条链接`}
+      />
+
+      <EntryBadge check={checks[index]} />
+
+      <button
+        className="link-row__remove"
+        onClick={() => store.removeEntry(index)}
+        title="删除这一条"
+        aria-label={`删除第 ${index + 1} 条`}
+      >
+        ×
+      </button>
+    </li>
+  );
+
   return (
     <div className="panel panel--left">
-      {store.validationError && (
-        <div className="alert alert--error">
-          <div className="alert__body">{store.validationError}</div>
-          <button className="alert__close" onClick={store.dismissNotice} aria-label="关闭">
-            ×
-          </button>
-        </div>
-      )}
+      {/* ---------- 顶部：固定 ---------- */}
+      <div className="panel__top">
+        {store.validationError && (
+          <div className="alert alert--error">
+            <div className="alert__body">{store.validationError}</div>
+            <button className="alert__close" onClick={store.dismissNotice} aria-label="关闭">
+              ×
+            </button>
+          </div>
+        )}
 
-      {store.notice && (
-        <div className="alert alert--info">
-          <div className="alert__body">{store.notice}</div>
-          <button className="alert__close" onClick={store.dismissNotice} aria-label="关闭">
-            ×
-          </button>
-        </div>
-      )}
-
-      {/* ---------- 批量粘贴 ---------- */}
-      <section className="section">
-        <div className="section__head">
-          <h2 className="section__title">粘贴链接</h2>
-          <span className={overLimit ? "section__hint section__hint--over" : "section__hint"}>
-            {validCount} / {MAX_URLS} 条
-          </span>
-        </div>
+        {store.notice && (
+          <div className="alert alert--info">
+            <div className="alert__body">{store.notice}</div>
+            <button className="alert__close" onClick={store.dismissNotice} aria-label="关闭">
+              ×
+            </button>
+          </div>
+        )}
 
         <textarea
           className="paste-box"
@@ -94,269 +157,176 @@ export function UrlPanel() {
               absorb(store.pasteInput);
             }
           }}
-          placeholder="直接粘贴，一行一个，也可以一行贴多个；按下回车或点「添加」加入列表"
+          placeholder="把链接粘贴到这里：一行一个，一行多个也会自动拆开；按回车加入列表"
           spellCheck={false}
           aria-label="粘贴链接"
         />
 
-        <div className="row row--between" style={{ marginTop: 7 }}>
+        <div className="row row--between paste-actions">
           <div className="row">
             <button onClick={() => absorb(store.pasteInput)} disabled={!store.pasteInput.trim()}>
               添加
             </button>
-            <button className="ghost" onClick={store.addBlankEntry} disabled={entries.length >= MAX_URLS}>
-              手动加一行
+            <button
+              className="ghost"
+              onClick={store.addBlankEntry}
+              disabled={entries.length >= store.maxUrls}
+            >
+              加一行
+            </button>
+            <button className="ghost" onClick={store.clearEntries} disabled={entries.length === 0}>
+              清空
             </button>
           </div>
-          <button className="ghost" onClick={store.clearEntries} disabled={entries.length === 0}>
-            清空
-          </button>
-        </div>
-      </section>
 
-      {/* ---------- 条目列表 ---------- */}
-      <section className="section">
-        <div className="section__head">
-          <h2 className="section__title">链接列表</h2>
-          <span className="section__hint">共 {entries.length} 条</span>
+          <label className="tier">
+            <span className="section__hint">上限</span>
+            <select
+              value={store.maxUrls}
+              onChange={(e) => store.setMaxUrls(Number(e.target.value))}
+              aria-label="链接数量上限"
+            >
+              {tiers.map((tier) => (
+                <option key={tier} value={tier}>
+                  {tier}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
+        <div className="row row--between paste-actions">
+          <span className={overLimit ? "section__hint section__hint--over" : "section__hint"}>
+            {validCount} / {store.maxUrls} 条可用
+          </span>
+          {minSeconds > 1 && (
+            <span className="section__hint" title="同一站点串行抓取，每次请求间隔至少 1 秒">
+              同站最多 {Math.round(minSeconds)} 条 · 预计至少 {minSeconds} 秒
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ---------- 中部：独立滚动 ---------- */}
+      <div
+        className={dragging ? "panel__list panel__list--dragging" : "panel__list"}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          const text = e.dataTransfer.getData("text");
+          if (text) absorb(text);
+        }}
+      >
         {entries.length === 0 ? (
           <p className="url-list__empty">
-            还没有链接。把浏览器地址栏的内容粘贴到上方即可，程序会自动拆分并逐条校验。
+            还没有链接。把浏览器地址栏的内容粘贴到上方即可，程序会自动拆分、逐条校验，
+            并标出哪几条会合并成同一份文档。
           </p>
         ) : (
-          <ul
-            className={dragging ? "url-list url-list--dragging" : "url-list"}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragging(true);
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragging(false);
-              const text = e.dataTransfer.getData("text");
-              if (text) absorb(text);
-            }}
-          >
-            {entries.map((entry, index) => {
-              const check = checks[index];
-              return (
-                <li className="url-row" key={index}>
-                  <span className="url-row__index">{index + 1}</span>
+          <>
+            <div className="list-bar">
+              <span className="section__hint">共 {entries.length} 条 · {groups.length} 份文档</span>
+              {problems.length > 0 && (
+                <label className="checkline checkline--inline">
+                  <input
+                    type="checkbox"
+                    checked={store.onlyProblems}
+                    onChange={(e) => store.setOnlyProblems(e.target.checked)}
+                  />
+                  <span className="section__hint section__hint--over">
+                    只看问题（{problems.length}）
+                  </span>
+                </label>
+              )}
+            </div>
 
-                  <div className="url-row__main">
-                    <input
-                      className="url-row__input"
-                      type="text"
-                      value={entry}
-                      onChange={(e) => store.setEntry(index, e.target.value)}
-                      placeholder="https://example.com/page"
-                      spellCheck={false}
-                      title={entry}
-                      aria-label={`第 ${index + 1} 条 URL`}
-                    />
-                    <EntryStatus check={check} />
+            {store.onlyProblems ? (
+              <ul className="url-list">{visible.map(renderRow)}</ul>
+            ) : (
+              groups.map((group) => {
+                const expanded = store.expandedGroups.has(group.key);
+                return (
+                  <div className="group" key={group.key}>
+                    <button
+                      className={
+                        group.problemCount > 0 ? "group__head group__head--problem" : "group__head"
+                      }
+                      onClick={() => store.toggleGroup(group.key)}
+                      aria-expanded={expanded}
+                    >
+                      <span className="group__caret">{expanded ? "▾" : "▸"}</span>
+                      <span className="group__label" title={group.label || undefined}>
+                        {group.label ? hostOf(group.label) : "未归组"}
+                        {group.label && group.label.includes("/") && (
+                          <span className="group__path">
+                            {group.label.slice(hostOf(group.label).length)}
+                          </span>
+                        )}
+                      </span>
+                      <span className="group__meta">
+                        {group.problemCount > 0 && (
+                          <span className="group__problem">{group.problemCount} 条有问题</span>
+                        )}
+                        {group.indexes.length} 条
+                      </span>
+                    </button>
+
+                    {expanded && <ul className="url-list">{group.indexes.map(renderRow)}</ul>}
                   </div>
-
-                  <button
-                    className="url-row__remove"
-                    onClick={() => store.removeEntry(index)}
-                    title="删除这一条"
-                    aria-label={`删除第 ${index + 1} 条`}
-                  >
-                    ×
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+                );
+              })
+            )}
+          </>
         )}
 
-        {store.checkError && <p className="url-row__hint url-row__hint--error">{store.checkError}</p>}
-      </section>
-
-      {/* ---------- 输出格式 ---------- */}
-      <section className="section">
-        <div className="section__head">
-          <h2 className="section__title">输出格式</h2>
-        </div>
-        <div className="choice-group">
-          {(
-            [
-              ["markdown", "Markdown", "仅生成 .md 文件"],
-              ["pdf", "PDF", "经 Chromium 打印为 PDF"],
-              ["both", "Markdown + PDF", "两种格式同时生成"],
-            ] as const
-          ).map(([value, label, desc]) => (
-            <label className="choice" key={value}>
-              <input
-                type="radio"
-                name="format"
-                checked={store.format === value}
-                onChange={() => store.setFormat(value)}
-              />
-              <span>
-                <span className="choice__label">{label}</span>
-                <span className="choice__desc" style={{ display: "block" }}>
-                  {desc}
-                </span>
-              </span>
-            </label>
-          ))}
-        </div>
-      </section>
-
-      {/* ---------- 图片处理 ---------- */}
-      <section className="section">
-        <div className="section__head">
-          <h2 className="section__title">图片处理</h2>
-        </div>
-        <div className="choice-group">
-          <label className="choice">
-            <input
-              type="radio"
-              name="images"
-              checked={store.imageStrategy === "remote"}
-              onChange={() => store.setImageStrategy("remote")}
-            />
-            <span>
-              <span className="choice__label">保留远程链接</span>
-              <span className="choice__desc" style={{ display: "block" }}>
-                Markdown 引用原始图片地址，产物体积小
-              </span>
-            </span>
-          </label>
-          <label className="choice">
-            <input
-              type="radio"
-              name="images"
-              checked={store.imageStrategy === "local"}
-              onChange={() => store.setImageStrategy("local")}
-            />
-            <span>
-              <span className="choice__label">下载到本地</span>
-              <span className="choice__desc" style={{ display: "block" }}>
-                图片存入同名 .assets 目录，离线可读
-              </span>
-            </span>
-          </label>
-        </div>
-      </section>
-
-      {/* ---------- 抓取设置 ---------- */}
-      <section className="section">
-        <div className="section__head">
-          <h2 className="section__title">抓取设置</h2>
-        </div>
-
-        <label className="checkline">
-          <input
-            type="checkbox"
-            checked={store.mergeDocuments}
-            onChange={(e) => store.setMergeDocuments(e.target.checked)}
-          />
-          相似链接合并为同一文档
-        </label>
-        <p className="section__hint" style={{ margin: "2px 0 4px 22px" }}>
-          同一目录下的多个链接会合并为一份文档；下次抓取相似链接时，会继续追加到该文档末尾。
-        </p>
-        {store.mergeDocuments && (
-          <div className="row" style={{ margin: "0 0 8px 22px" }}>
-            <button className="ghost" onClick={() => void store.resetMergeRecords()}>
-              清除合并记录
-            </button>
-            <span className="section__hint">清除后一律新建文档</span>
-          </div>
+        {store.checkError && (
+          <p className="url-list__empty url-list__empty--error">{store.checkError}</p>
         )}
+      </div>
 
-        <label className="checkline">
-          <input
-            type="checkbox"
-            checked={store.followPagination}
-            onChange={(e) => store.setFollowPagination(e.target.checked)}
-          />
-          自动续页
-        </label>
-
-        {store.followPagination && (
-          <div className="row" style={{ margin: "4px 0 6px 22px" }}>
-            <span className="section__hint">最多</span>
-            <input
-              type="number"
-              min={1}
-              max={MAX_PAGINATION}
-              value={store.maxPagination}
-              onChange={(e) => store.setMaxPagination(Number(e.target.value))}
-              aria-label="自动续页上限"
-            />
-            <span className="section__hint">页</span>
-          </div>
-        )}
-
-        <label className="checkline">
-          <input
-            type="checkbox"
-            checked={store.separateOutput}
-            onChange={(e) => store.setSeparateOutput(e.target.checked)}
-          />
-          每个链接独立输出
-        </label>
-
-        <label className="checkline">
-          <input
-            type="checkbox"
-            checked={store.obeyRobots}
-            onChange={(e) => store.setObeyRobots(e.target.checked)}
-          />
-          遵循 robots.txt
-        </label>
-        <p className="section__hint" style={{ margin: "2px 0 0 22px" }}>
-          您手动填写的 URL 始终可抓取；该设置约束的是自动续页发现的页面。
-        </p>
-      </section>
-
-      {/* ---------- 保存位置 ---------- */}
-      <section className="section">
-        <div className="section__head">
-          <h2 className="section__title">保存位置</h2>
-        </div>
+      {/* ---------- 底部：固定 ---------- */}
+      <div className="panel__bottom">
         <div className="path-box">
           <div
             className={store.saveDir ? "path-box__value" : "path-box__value path-box__value--empty"}
             title={store.saveDir || undefined}
           >
-            {store.saveDir || "尚未选择"}
+            {store.saveDir || "尚未选择保存位置"}
           </div>
           <button onClick={() => void store.chooseSaveDir()}>选择</button>
         </div>
-      </section>
 
-      {/* ---------- 登录站点 ---------- */}
-      <section className="section">
-        <div className="section__head">
-          <h2 className="section__title">登录站点</h2>
+        <div className="row row--between">
+          <div className="row">
+            <button className="ghost" onClick={() => setSettingsOpen(true)}>
+              设置
+            </button>
+            <button
+              className="ghost"
+              onClick={() => void store.login()}
+              disabled={store.loginBusy}
+              title="使用列表中的第一条链接所属站点"
+            >
+              {store.loginBusy ? "等待登录…" : "登录站点"}
+            </button>
+          </div>
+
+          <button
+            className="primary"
+            onClick={() => void store.run()}
+            disabled={store.running || overLimit || entries.length === 0}
+          >
+            {store.running ? "抓取中…" : "开始抓取"}
+          </button>
         </div>
-        <button onClick={() => void store.login()} disabled={store.loginBusy}>
-          {store.loginBusy ? "等待登录窗口…" : "打开浏览器登录"}
-        </button>
-        <p className="section__hint" style={{ marginTop: 6 }}>
-          使用列表中的第一条链接所属站点。请在打开的浏览器窗口中自行输入账号与验证码，
-          WebScribe 不会读取或保存您的密码。
-        </p>
-      </section>
+      </div>
 
-      <button
-        className="primary"
-        style={{ width: "100%", marginTop: 4 }}
-        onClick={() => void store.run()}
-        disabled={store.running || overLimit || entries.length === 0}
-      >
-        {store.running ? "抓取中…" : "开始抓取"}
-      </button>
+      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }
-
-export { splitUrls };

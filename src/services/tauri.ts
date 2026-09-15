@@ -12,8 +12,8 @@ import type {
 /** 与 Rust 侧 `commands.rs` 暴露的 Tauri 命令一一对应。 */
 
 /** 逐条校验 URL。返回与输入行一一对应的结果。 */
-export function validateUrls(urls: string[]): Promise<UrlValidation> {
-  return invoke<UrlValidation>("validate_urls", { urls });
+export function validateUrls(urls: string[], maxUrls: number): Promise<UrlValidation> {
+  return invoke<UrlValidation>("validate_urls", { urls, maxUrls });
 }
 
 /** 查询运行时环境是否齐备。 */

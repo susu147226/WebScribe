@@ -12,8 +12,8 @@ import {
   validateUrls,
 } from "../services/tauri";
 import {
+  FALLBACK_LINK_LIMIT_TIERS,
   MAX_PAGINATION,
-  MAX_URLS,
   STATE_LABELS,
   type CrawlRequest,
   type EnvironmentStatus,
@@ -46,6 +46,12 @@ interface TaskStore {
   checkError: string | null;
   /** 批量粘贴框的内容。粘贴后即清空，不作为长期状态。 */
   pasteInput: string;
+  /** 本次任务的链接数量上限（档位）。 */
+  maxUrls: number;
+  /** 已展开的文档分组键。 */
+  expandedGroups: Set<string>;
+  /** 只看有问题的条目。 */
+  onlyProblems: boolean;
 
   saveDir: string;
   format: OutputFormat;
@@ -74,6 +80,10 @@ interface TaskStore {
   addBlankEntry: () => void;
   clearEntries: () => void;
   revalidate: () => void;
+  setMaxUrls: (value: number) => void;
+  toggleGroup: (key: string) => void;
+  setGroupsExpanded: (keys: string[]) => void;
+  setOnlyProblems: (value: boolean) => void;
 
   setSaveDir: (value: string) => void;
   chooseSaveDir: () => Promise<void>;
@@ -119,6 +129,9 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
   urlChecks: [],
   checkError: null,
   pasteInput: "",
+  maxUrls: FALLBACK_LINK_LIMIT_TIERS[1],
+  expandedGroups: new Set<string>(),
+  onlyProblems: false,
 
   saveDir: "",
   format: "markdown",
@@ -141,13 +154,13 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
   setPasteInput: (value) => set({ pasteInput: value }),
 
   addFromText: (value) => {
-    const { entries, overLimit } = mergeEntries(get().urlEntries, value, MAX_URLS);
+    const { entries, overLimit } = mergeEntries(get().urlEntries, value, get().maxUrls);
 
     set({
       urlEntries: entries,
       pasteInput: "",
       validationError: overLimit
-        ? `一次任务最多 ${MAX_URLS} 个 URL，当前有 ${entries.length} 个。请删除多余项。`
+        ? `本次任务的上限是 ${get().maxUrls} 个链接，当前有 ${entries.length} 个。请删除多余项，或在上方调高上限。`
         : null,
     });
 
@@ -172,8 +185,8 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
 
   addBlankEntry: () => {
     const entries = get().urlEntries;
-    if (entries.length >= MAX_URLS) {
-      set({ validationError: `一次任务最多 ${MAX_URLS} 个 URL。` });
+    if (entries.length >= get().maxUrls) {
+      set({ validationError: `本次任务的上限是 ${get().maxUrls} 个链接。` });
       return;
     }
     set({ urlEntries: [...entries, ""], validationError: null });
@@ -181,8 +194,32 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
   },
 
   clearEntries: () => {
-    set({ urlEntries: [], pasteInput: "", urlChecks: [], checkError: null, validationError: null });
+    set({
+      urlEntries: [],
+      pasteInput: "",
+      urlChecks: [],
+      checkError: null,
+      validationError: null,
+      expandedGroups: new Set<string>(),
+      onlyProblems: false,
+    });
   },
+
+  setMaxUrls: (value) => {
+    set({ maxUrls: value, validationError: null });
+    get().revalidate();
+  },
+
+  toggleGroup: (key) => {
+    const next = new Set(get().expandedGroups);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    set({ expandedGroups: next });
+  },
+
+  setGroupsExpanded: (keys) => set({ expandedGroups: new Set(keys) }),
+
+  setOnlyProblems: (value) => set({ onlyProblems: value }),
 
   /** 请求主程序逐条校验。带防抖，避免连续输入时反复往返。 */
   revalidate: () => {
@@ -195,7 +232,7 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
         return;
       }
 
-      void validateUrls(entries)
+      void validateUrls(entries, get().maxUrls)
         .then((result) => {
           // 校验期间输入可能又变了，丢弃过期结果
           if (!entriesEqual(get().urlEntries, entries)) return;
@@ -242,7 +279,15 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
 
   refreshEnvironment: async () => {
     try {
-      set({ env: await environmentStatus() });
+      const env = await environmentStatus();
+
+      // 档位以主程序为准；当前值不在档位里时回落到默认档位
+      const tiers = env.linkLimitTiers?.length ? env.linkLimitTiers : FALLBACK_LINK_LIMIT_TIERS;
+      const fallback = env.defaultLinkLimit ?? tiers[Math.floor(tiers.length / 2)] ?? tiers[0];
+      const maxUrls = tiers.includes(get().maxUrls) ? get().maxUrls : fallback;
+
+      set({ env, maxUrls });
+      get().revalidate();
     } catch (error) {
       set({ env: null, notice: `无法读取环境状态：${String(error)}` });
     }
@@ -264,7 +309,7 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
     // 以主程序的校验结果为准，界面上的结果可能尚未刷新
     let validation;
     try {
-      validation = await validateUrls(state.urlEntries);
+      validation = await validateUrls(state.urlEntries, state.maxUrls);
     } catch (error) {
       set({ validationError: `URL 校验失败：${String(error)}` });
       return;
@@ -310,6 +355,7 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
       separateOutput: state.separateOutput,
       obeyRobots: state.obeyRobots,
       mergeDocuments: state.mergeDocuments,
+      maxUrls: state.maxUrls,
       saveDir: state.saveDir,
     };
 

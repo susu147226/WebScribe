@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   ERROR_LABELS,
+  FALLBACK_LINK_LIMIT_TIERS,
   MAX_PAGINATION,
-  MAX_URLS,
   STATE_LABELS,
   type CrawlErrorKind,
   type TaskState,
@@ -80,12 +80,20 @@ describe("文档第 37 条：错误类型", () => {
   });
 });
 
-describe("文档第 16、22 条：上限常量", () => {
-  it("单任务最多 10 个 URL", () => {
-    expect(MAX_URLS).toBe(10);
-  });
-
+describe("上限常量", () => {
   it("自动续页上限为 5", () => {
     expect(MAX_PAGINATION).toBe(5);
+  });
+
+  it("链接数量档位由小到大且包含 10", () => {
+    const tiers = FALLBACK_LINK_LIMIT_TIERS;
+    expect(tiers).toContain(10);
+    expect([...tiers].sort((a, b) => a - b)).toEqual(tiers);
+  });
+
+  it("档位均为正整数", () => {
+    for (const tier of FALLBACK_LINK_LIMIT_TIERS) {
+      expect(Number.isInteger(tier) && tier > 0, `${tier} 不是正整数`).toBe(true);
+    }
   });
 });

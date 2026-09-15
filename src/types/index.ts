@@ -74,6 +74,10 @@ export interface EnvironmentStatus {
   logPath: string | null;
   /** 当前版本号，取自主程序。 */
   version: string;
+  /** 可选的链接数量档位，由主程序提供。 */
+  linkLimitTiers: number[];
+  /** 默认档位。 */
+  defaultLinkLimit: number;
 }
 
 export interface CrawlRequest {
@@ -86,6 +90,8 @@ export interface CrawlRequest {
   obeyRobots: boolean;
   /** 是否把相似链接合并为同一份文档。 */
   mergeDocuments: boolean;
+  /** 本次任务的链接数量上限（档位）。 */
+  maxUrls: number;
   saveDir: string;
 }
 
@@ -156,11 +162,14 @@ export interface FinishedPayload {
   pdfs: Array<[string, string]>;
 }
 
-/** 文档第 16 条：一次任务最多 10 个 URL。 */
-export const MAX_URLS = 10;
-
-/** 文档第 22 条：自动续页上限。 */
+/** 自动续页上限。 */
 export const MAX_PAGINATION = 5;
+
+/**
+ * 链接数量档位的兜底值，仅在尚未从主程序取到档位时使用。
+ * 正常运行时以 `EnvironmentStatus.linkLimitTiers` 为准，避免两边各写一份而漂移。
+ */
+export const FALLBACK_LINK_LIMIT_TIERS = [10, 50, 100];
 
 /** 状态的中文说明，用于兜底展示。 */
 export const STATE_LABELS: Record<TaskState, string> = {

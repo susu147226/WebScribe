@@ -2,8 +2,23 @@ use crate::error::{CrawlError, CrawlErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-/// 文档第 16 条：一次任务最多 10 个 URL。
-pub const MAX_URLS: usize = 10;
+/// 单次任务可选的链接数量档位。
+///
+/// 上限不固定为单一数值：链接越多，落在同一站点的请求就越多，既拉长运行时间
+/// （同站串行、每次至少间隔 1 秒），也更容易触发限流或验证码而中途停下。
+/// 因此交由用户按任务自行选择。
+pub const LINK_LIMIT_TIERS: [usize; 3] = [10, 50, 100];
+
+/// 默认档位。
+pub const DEFAULT_LINK_LIMIT: usize = 50;
+
+/// 允许的最大档位，用于兜底。
+pub const MAX_LINK_LIMIT: usize = 100;
+
+/// 把外部传入的上限规整到合法范围，避免出现 0 或超出上限的值。
+pub fn clamp_link_limit(limit: usize) -> usize {
+    limit.clamp(1, MAX_LINK_LIMIT)
+}
 
 /// 一个通过校验的 URL 条目。
 ///
@@ -128,9 +143,11 @@ pub struct DedupOutcome {
 
 /// 逐条校验并查重。
 ///
-/// 文档第 18 条：同一次任务中同一 URL 不得重复访问。文档第 16 条：超过
-/// 10 个必须报错，不得静默截断，也不得自动只取前 10 个。
-pub fn validate_and_dedup(raw_urls: &[String]) -> Result<DedupOutcome> {
+/// 同一次任务中同一 URL 不得重复访问；超过 `limit` 个必须报错，不得静默截断，
+/// 也不得自动只取前若干个。
+pub fn validate_and_dedup(raw_urls: &[String], limit: usize) -> Result<DedupOutcome> {
+    let limit = clamp_link_limit(limit);
+
     let non_empty: Vec<&String> = raw_urls
         .iter()
         .filter(|u| !u.trim().is_empty())
@@ -141,9 +158,9 @@ pub fn validate_and_dedup(raw_urls: &[String]) -> Result<DedupOutcome> {
             .with_detail("未提供任何 URL"));
     }
 
-    if non_empty.len() > MAX_URLS {
+    if non_empty.len() > limit {
         return Err(CrawlError::new(CrawlErrorKind::InvalidURL).with_detail(format!(
-            "一次任务最多支持 {MAX_URLS} 个 URL，当前提供了 {} 个。请减少后重试。",
+            "本次任务的上限是 {limit} 个链接，当前提供了 {} 个。请减少，或在上方调高上限。",
             non_empty.len()
         )));
     }
@@ -256,7 +273,7 @@ mod tests {
             "https://example.com/b".to_string(),
             "https://example.com/a".to_string(),
         ];
-        let out = validate_and_dedup(&input).unwrap();
+        let out = validate_and_dedup(&input, DEFAULT_LINK_LIMIT).unwrap();
         assert_eq!(out.unique.len(), 2);
         assert_eq!(out.unique[0].raw, "https://example.com/a");
         assert_eq!(out.unique[1].raw, "https://example.com/b");
@@ -270,7 +287,7 @@ mod tests {
             "https://example.com/a".to_string(),
             "https://EXAMPLE.com/a/".to_string(),
         ];
-        let out = validate_and_dedup(&input).unwrap();
+        let out = validate_and_dedup(&input, DEFAULT_LINK_LIMIT).unwrap();
         assert_eq!(out.unique.len(), 1);
         assert_eq!(out.duplicates.len(), 1);
     }
@@ -280,35 +297,96 @@ mod tests {
         let input: Vec<String> = (0..10)
             .map(|i| format!("https://example.com/{i}"))
             .collect();
-        let out = validate_and_dedup(&input).unwrap();
+        let out = validate_and_dedup(&input, DEFAULT_LINK_LIMIT).unwrap();
         assert_eq!(out.unique.len(), 10);
     }
 
     #[test]
-    fn 十一个_url_报错而非静默截断() {
+    fn 空列表报错() {
+        assert!(validate_and_dedup(&[], DEFAULT_LINK_LIMIT).is_err());
+        assert!(validate_and_dedup(&["".to_string(), "  ".to_string()], DEFAULT_LINK_LIMIT).is_err());
+    }
+
+    #[test]
+    fn 空白行被忽略不占用配额() {
+        let mut input: Vec<String> = (0..50)
+            .map(|i| format!("https://example.com/{i}"))
+            .collect();
+        input.push(String::new());
+        input.push("   ".to_string());
+
+        // 默认档位为 50：50 条有效 + 2 个空行仍应通过，说明空行不占名额
+        let out = validate_and_dedup(&input, DEFAULT_LINK_LIMIT).unwrap();
+        assert_eq!(out.unique.len(), 50);
+    }
+
+    #[test]
+    fn 超过所选档位时报错而非静默截断() {
         let input: Vec<String> = (0..11)
             .map(|i| format!("https://example.com/{i}"))
             .collect();
-        let err = validate_and_dedup(&input).unwrap_err();
+
+        let err = validate_and_dedup(&input, 10).unwrap_err();
         assert_eq!(err.kind, CrawlErrorKind::InvalidURL);
         assert!(err.detail.unwrap().contains("11"));
     }
 
     #[test]
-    fn 空列表报错() {
-        assert!(validate_and_dedup(&[]).is_err());
-        assert!(validate_and_dedup(&["".to_string(), "  ".to_string()]).is_err());
+    fn 超过档位时不会自动只取前若干个() {
+        let input: Vec<String> = (0..15)
+            .map(|i| format!("https://example.com/{i}"))
+            .collect();
+
+        // 必须整体报错，而不是悄悄截断成 10 条
+        assert!(validate_and_dedup(&input, 10).is_err());
     }
 
     #[test]
-    fn 空白行被忽略不占用配额() {
-        let mut input: Vec<String> = (0..10)
+    fn 十一在更大的档位下可以通过() {
+        let input: Vec<String> = (0..11)
             .map(|i| format!("https://example.com/{i}"))
             .collect();
-        input.push(String::new());
-        input.push("   ".to_string());
-        let out = validate_and_dedup(&input).unwrap();
-        assert_eq!(out.unique.len(), 10);
+
+        let out = validate_and_dedup(&input, 50).unwrap();
+        assert_eq!(out.unique.len(), 11);
+    }
+
+    #[test]
+    fn 每个档位取上限值都能通过() {
+        for tier in LINK_LIMIT_TIERS {
+            let input: Vec<String> = (0..tier)
+                .map(|i| format!("https://example.com/{i}"))
+                .collect();
+
+            let out = validate_and_dedup(&input, tier).unwrap_or_else(|e| {
+                panic!("{tier} 条应当通过，却报错：{}", e.message_with_detail())
+            });
+            assert_eq!(out.unique.len(), tier);
+        }
+    }
+
+    #[test]
+    fn 档位之外的数值被钳制到合法范围() {
+        assert_eq!(clamp_link_limit(0), 1, "0 应被抬到 1，不能变成无上限");
+        assert_eq!(clamp_link_limit(10), 10);
+        assert_eq!(clamp_link_limit(50), 50);
+        assert_eq!(clamp_link_limit(1000), MAX_LINK_LIMIT);
+    }
+
+    #[test]
+    fn 默认档位是可选档位之一() {
+        assert!(
+            LINK_LIMIT_TIERS.contains(&DEFAULT_LINK_LIMIT),
+            "默认值 {DEFAULT_LINK_LIMIT} 不在档位 {LINK_LIMIT_TIERS:?} 中"
+        );
+    }
+
+    #[test]
+    fn 档位由小到大排列且包含最大值() {
+        let mut sorted = LINK_LIMIT_TIERS;
+        sorted.sort_unstable();
+        assert_eq!(sorted, LINK_LIMIT_TIERS, "档位应便于界面按顺序展示");
+        assert_eq!(*LINK_LIMIT_TIERS.last().unwrap(), MAX_LINK_LIMIT);
     }
 
     #[test]
@@ -317,7 +395,7 @@ mod tests {
             "https://example.com/a".to_string(),
             "这不是URL".to_string(),
         ];
-        assert!(validate_and_dedup(&input).is_err());
+        assert!(validate_and_dedup(&input, DEFAULT_LINK_LIMIT).is_err());
     }
 
     // ---- 文档分组 ----
