@@ -1,0 +1,39 @@
+{
+  "name": "webscribe",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "轻量级网页文档抓取、整理与 Markdown/PDF 转存工具",
+  "author": "云舒眠眠",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "node tests/integration/crawler-e2e.mjs",
+    "crawler:install": "npm --prefix crawler install",
+    "crawler:build": "npm --prefix crawler run build",
+    "crawler:test": "npm --prefix crawler run test",
+    "test:all": "npm run test && npm run crawler:test && npm run test:integration && cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^6.0.2",
+    "jsdom": "^25.0.1",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "^3.0.5"
+  }
+}

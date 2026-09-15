@@ -1,0 +1,32 @@
+{
+  "name": "webscribe-crawler",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "WebScribe 抓取 sidecar：HTTP First，必要时使用 Playwright",
+  "author": "云舒眠眠",
+  "license": "UNLICENSED",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^26.0.0",
+    "marked": "^18.0.13",
+    "playwright": "^1.63.0",
+    "robots-parser": "^3.0.1",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^24.0.0",
+    "@types/turndown": "^5.0.5",
+    "typescript": "~6.0.3",
+    "vitest": "^3.0.5"
+  }
+}

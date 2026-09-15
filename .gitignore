@@ -1,0 +1,72 @@
+# ============================================================
+# WebScribe .gitignore
+# 文档第 30 条：登录态属于敏感数据，必须加入 .gitignore
+# 文档第 47 条：禁止提交 node_modules/ target/ 认证状态 Cookie
+#              Token 密码 本地用户数据 构建缓存 临时文件
+# ============================================================
+
+# ---------- 登录态 / 认证凭据（最高优先级，任何情况下不得提交）----------
+.auth/
+.storage/
+.sessions/
+*.state.json
+storage-state*.json
+cookies*.json
+*credentials*
+*token*.json
+
+# ---------- Node ----------
+node_modules/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.pnpm-store/
+
+# ---------- Rust / Tauri ----------
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# ---------- 前端构建产物 ----------
+dist/
+dist-ssr/
+*.local
+
+# ---------- crawler 构建产物 ----------
+crawler/dist/
+crawler/node_modules/
+
+# ---------- 随包运行时（体积巨大，由 scripts/fetch-runtime.ps1 生成）----------
+runtime/
+
+# ---------- 构建与发布产物 ----------
+artifacts/
+*.exe
+*.msi
+*.zip
+!scripts/**/*.ps1
+
+# ---------- 编辑器 / IDE ----------
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*~
+
+# ---------- 操作系统 ----------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---------- 日志与临时文件 ----------
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak

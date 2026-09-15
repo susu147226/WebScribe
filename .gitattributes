@@ -1,0 +1,47 @@
+# ============================================================
+# WebScribe .gitattributes
+# ============================================================
+
+* text=auto
+
+# ---------- 强制 LF ----------
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.rs        text eol=lf
+*.toml      text eol=lf
+
+# ---------- 强制 CRLF（Windows 专用脚本与工程文件）----------
+*.ps1       text eol=crlf
+*.psm1      text eol=crlf
+*.cmd       text eol=crlf
+*.bat       text eol=crlf
+*.sln       text eol=crlf
+*.csproj    text eol=crlf
+
+# ---------- 二进制 ----------
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.icns      binary
+*.exe       binary
+*.dll       binary
+*.zip       binary
+*.pdf       binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+
+# ---------- 语言统计排除 ----------
+package-lock.json   linguist-generated=true -diff
+pnpm-lock.yaml      linguist-generated=true -diff
+Cargo.lock          linguist-generated=true -diff
