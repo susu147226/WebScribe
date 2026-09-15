@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn 出站_crawl_消息序列化为_camelCase() {
+    fn 出站_crawl_消息序列化为_camel_case() {
         let msg = Outbound::Crawl {
             targets: vec![CrawlTarget {
                 raw: "https://example.com/a".into(),

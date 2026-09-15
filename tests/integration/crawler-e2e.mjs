@@ -216,6 +216,17 @@ async function main() {
     check("保留了表格", result1?.markdown?.includes("| 列一 |"), "");
     check("保留了行内代码", result1?.markdown?.includes("`npm run build`"), "");
     check("保留了代码块", result1?.markdown?.includes("```"), "");
+    // 真实文档站写法：表头用 td；代码块套在装饰性 div 里且以 ol/li 逐行给出
+    check("表头行用 td 的表格也转为 Markdown",
+      result1?.markdown?.includes("| **参数** | **注释** |") && !result1?.markdown?.includes("<table"),
+      "仍有未转换的表格");
+    check("表格内部的 id 属性被清理", !result1?.markdown?.includes("id=\"T__"), "");
+    check("装饰性容器内的代码块未被丢弃",
+      result1?.markdown?.includes("Var") && result1?.markdown?.includes('<Text x="40" />'),
+      "代码内容缺失");
+    check("代码块不带 highlight.js 的误判语言",
+      !result1?.markdown?.includes("```vbnet") && !result1?.markdown?.includes("```perl"),
+      "");
     check("保留了引用", result1?.markdown?.includes("> 这是一段引用文字"), "");
     check("保留了图片", result1?.markdown?.includes("![示例图片]"), "");
     check("图片地址被解析为绝对路径", result1?.markdown?.includes(`${fixture.baseUrl}/images/sample.png`), "");

@@ -197,7 +197,7 @@ where
             }
 
             match serde_json::from_str::<Inbound>(trimmed) {
-                Ok(message) => handle_inbound(&app, &state, message).await,
+                Ok(message) => handle_inbound(&app, Arc::clone(&state), message).await,
                 Err(e) => {
                     // 无法解析的行属于 crawler 内部问题，记录到 stderr 即可，
                     // 不向用户暴露原始内容（可能含页面数据）

@@ -50,10 +50,14 @@ const ARTICLE_HTML = `<!doctype html>
         <tr><td>值 C</td><td>值 D</td></tr>
       </tbody>
     </table>
+    <p>下面这张表模仿真实文档站的写法：表头行用的是 td 而非 th，也没有 thead。</p>
+    <table id="T__table1"><tbody><tr id="T__r1"><td><p id="T__p1"><strong>参数</strong></p></td><td><p id="T__p2"><strong>注释</strong></p></td></tr><tr id="T__r2"><td><p id="T__p3">touch_x</p></td><td><p id="T__p4">当前触摸点的x坐标</p></td></tr></tbody></table>
     <h3>代码</h3>
     <p>行内代码示例 <code>npm run build</code>。</p>
     <pre><code>const greeting = "你好";
 console.log(greeting);</code></pre>
+    <p>下面这段代码模仿真实文档站的写法：外层套了装饰性 div，代码以 ol/li 逐行给出，并已被 highlight.js 着色。</p>
+    <div class="highlight-scroll-div"><div class="highlight-div"><pre class="screen prettyprint linenums hljs language-vbnet" id="T__screen1" data-highlighted="yes"><ol class="linenums"><li>&lt;<span class="hljs-keyword">Var</span> <span class="hljs-attr">name</span>=<span class="hljs-string">""</span> /&gt;</li><li>&lt;<span class="hljs-name">Text</span> <span class="hljs-attr">x</span>=<span class="hljs-string">"40"</span> /&gt;</li></ol></pre></div></div>
     <h3>引用</h3>
     <blockquote><p>这是一段引用文字。</p></blockquote>
     <h3>图片</h3>

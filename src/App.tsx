@@ -32,7 +32,10 @@ export default function App() {
             <span>正在检查运行时…</span>
           ) : env.ready ? (
             <>
-              <span className="badge badge--done">
+              <span
+                className="badge badge--done"
+                title={env.logPath ? `日志：${env.logPath}` : undefined}
+              >
                 <span className="badge__dot" />
                 运行时就绪
               </span>

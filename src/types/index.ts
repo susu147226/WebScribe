@@ -67,6 +67,8 @@ export interface EnvironmentStatus {
   nodePath: string;
   crawlerPath: string;
   problem: string | null;
+  /** 结构化日志文件路径，出问题时可直接查看。 */
+  logPath: string | null;
 }
 
 export interface CrawlRequest {

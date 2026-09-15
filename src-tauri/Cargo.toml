@@ -1,6 +1,6 @@
 [package]
 name = "webscribe"
-version = "0.1.0"
+version = "0.1.1"
 description = "轻量级网页文档抓取、整理与 Markdown/PDF 转存工具"
 authors = ["云舒眠眠"]
 edition = "2021"
@@ -29,7 +29,7 @@ chrono = "0.4"
 thiserror = "2"
 anyhow = "1"
 base64 = "0.22"
-tokio = { version = "1", features = ["process", "io-util", "sync", "rt", "macros"] }
+tokio = { version = "1", features = ["process", "io-util", "sync", "rt", "macros", "time"] }
 
 [dev-dependencies]
 

@@ -1,6 +1,8 @@
 import { Readability } from "@mozilla/readability";
 import { JSDOM, VirtualConsole } from "jsdom";
 
+import { preprocessForReadability } from "./preprocess.js";
+
 /**
  * 正文提取。
  *
@@ -124,6 +126,10 @@ export function extractContent(html: string, url: string): ExtractedContent | nu
   }
 
   const documentTitle = dom.window.document.title ?? "";
+
+  // 必须在 Readability 之前：拆掉包裹代码块的装饰性 div（否则 Readability 会
+  // 连同其中的 <pre> 一并删除），并把代码规范化为 pre > code
+  preprocessForReadability(dom.window.document);
 
   let article: ReturnType<Readability["parse"]> = null;
   try {

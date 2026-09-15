@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { mergeUrls, parseUrls } from "../services/urlInput";
+import { createPendingRows } from "../services/taskRows";
 import {
   environmentStatus,
   onCrawlerEvent,
@@ -73,23 +74,6 @@ interface TaskStore {
 
 function nowLabel(): string {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
-}
-
-function emptyRow(raw: string): TaskRow {
-  return {
-    key: raw,
-    url: raw,
-    title: "",
-    state: "Pending",
-    stateLabel: STATE_LABELS.Pending,
-    step: "等待中",
-    progress: 0,
-    errorKind: null,
-    errorMessage: null,
-    errorDetail: null,
-    isDefense: false,
-    outputFiles: [],
-  };
 }
 
 export const useTaskStore = create<TaskStore>()((set, get) => ({
@@ -195,7 +179,8 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
       validationError: null,
       notice,
       running: true,
-      tasks: validation.accepted.map((entry) => emptyRow(entry.raw)),
+      // key 必须来自 Rust 规范化后的值，不能用原始输入 —— 见 taskRows.ts 说明
+      tasks: createPendingRows(validation.accepted),
       logs: [],
     });
 

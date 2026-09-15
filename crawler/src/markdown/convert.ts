@@ -1,6 +1,8 @@
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
 
+import { promoteTableHeaders } from "./tables.js";
+
 /**
  * HTML → Markdown 转换。
  *
@@ -109,7 +111,9 @@ export async function toMarkdown(
     },
   });
 
-  const normalized = normalizeImageAttributes(html, baseUrl);
+  // 先补齐表格的表头结构：GFM 表格规则要求首行是 th，否则整张表会退化为
+  // 原始 HTML（见 tables.ts 的说明）
+  const normalized = promoteTableHeaders(normalizeImageAttributes(html, baseUrl));
 
   const markdown = service.turndown(normalized);
 

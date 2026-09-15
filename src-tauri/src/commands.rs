@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{oneshot, Mutex};
 
 use crate::error::{CrawlError, CrawlErrorKind, Result};
+use crate::logging::{LogEntry, Logger};
 use crate::protocol::{CrawlOptions, CrawlTarget, ImageStrategy, Inbound, Outbound, OutputFormat};
 use crate::sidecar::{RuntimePaths, Sidecar};
 use crate::task::{self, CrawlRun, FailureRecord, PdfJob};
@@ -28,6 +29,29 @@ pub struct AppState {
     pub pdf_waiters: Mutex<HashMap<String, oneshot::Sender<PdfOutcome>>>,
     /// 登录窗口的启动网址，供 UI 在关闭后提示用户。
     pub login_domain: Mutex<Option<String>>,
+    /// 结构化日志。启动时初始化一次，此后只读。
+    logger: std::sync::OnceLock<Arc<Logger>>,
+}
+
+impl AppState {
+    /// 初始化结构化日志（文档第 38 条）。启动时调用一次。
+    pub fn init_logger(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        let logger = Arc::new(Logger::new(dir)?);
+        let _ = self.logger.set(logger);
+        Ok(())
+    }
+
+    /// 日志文件路径，供 UI 或排查时定位。
+    pub fn log_path(&self) -> Option<String> {
+        self.logger.get().map(|l| l.path().display().to_string())
+    }
+
+    /// 写一条日志。日志未初始化或写入失败都不应影响主流程。
+    fn log(&self, entry: LogEntry) {
+        if let Some(logger) = self.logger.get() {
+            let _ = logger.write(&entry);
+        }
+    }
 }
 
 impl AppState {
@@ -37,6 +61,35 @@ impl AppState {
             .await
             .clone()
             .ok_or_else(|| CrawlError::new(CrawlErrorKind::PageRenderFailed).with_detail("crawler 尚未启动"))
+    }
+
+    /// 取得 crawler sidecar，尚未启动时先启动它。
+    ///
+    /// **务必保持这种写法。** 不可改写成
+    /// `match self.sidecar.lock().await.clone() { Some(..) => .., None => { *self.sidecar.lock().await = .. } }`：
+    /// `match` 的匹配对象是临时量，其生命周期延续到**整个 match 表达式结束**，
+    /// 于是 `None` 分支里第二次 `lock()` 会在同一把锁上永久阻塞。
+    /// 该写法曾导致首次抓取永久卡在「等待中」，且不产生任何错误提示。
+    ///
+    /// 启动放在锁内完成，以避免并发调用重复拉起 crawler 进程；
+    /// `Sidecar::spawn` 是同步函数，持锁期间不会让出执行权。
+    pub async fn ensure_sidecar(self: &Arc<Self>, app: &AppHandle) -> Result<Arc<Sidecar>> {
+        let mut guard = self.sidecar.lock().await;
+
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+
+        let spawned = Arc::new(Sidecar::spawn(app, Arc::clone(self))?);
+        let paths = spawned.paths();
+
+        self.log(
+            LogEntry::new("sidecar-spawned")
+                .state(paths.crawler_entry.display().to_string()),
+        );
+
+        *guard = Some(spawned.clone());
+        Ok(spawned)
     }
 }
 
@@ -106,10 +159,14 @@ pub struct EnvironmentStatus {
     pub crawler_path: String,
     /// 齐备性问题说明。
     pub problem: Option<String>,
+    /// 结构化日志文件路径，便于排查问题时定位。
+    pub log_path: Option<String>,
 }
 
 #[tauri::command]
-pub fn environment_status(app: AppHandle) -> EnvironmentStatus {
+pub fn environment_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> EnvironmentStatus {
+    let log_path = state.log_path();
+
     let Ok(paths) = RuntimePaths::resolve(&app) else {
         return EnvironmentStatus {
             ready: false,
@@ -117,6 +174,7 @@ pub fn environment_status(app: AppHandle) -> EnvironmentStatus {
             node_path: String::new(),
             crawler_path: String::new(),
             problem: Some("无法解析运行时路径".into()),
+            log_path,
         };
     };
 
@@ -128,6 +186,7 @@ pub fn environment_status(app: AppHandle) -> EnvironmentStatus {
         node_path: paths.node_exe.display().to_string(),
         crawler_path: paths.crawler_entry.display().to_string(),
         problem,
+        log_path,
     }
 }
 
@@ -188,14 +247,7 @@ async fn start_crawl_inner(
     let save_dir = PathBuf::from(request.save_dir.trim());
     task::ensure_save_dir(&save_dir)?;
 
-    let sidecar = match state.sidecar.lock().await.clone() {
-        Some(s) => s,
-        None => {
-            let spawned = Arc::new(Sidecar::spawn(app, state.clone())?);
-            *state.sidecar.lock().await = Some(spawned.clone());
-            spawned
-        }
-    };
+    let sidecar = state.ensure_sidecar(app).await?;
 
     let paths = sidecar.paths().clone();
 
@@ -240,6 +292,11 @@ async fn start_crawl_inner(
         })
         .await?;
 
+    state.log(
+        LogEntry::new("crawl-started")
+            .state(format!("{total} 个 URL（跳过 {duplicate_count} 个重复）")),
+    );
+
     Ok(StartOutcome {
         total,
         duplicates: duplicate_count,
@@ -269,14 +326,7 @@ async fn open_login_inner(app: &AppHandle, state: Arc<AppState>, url: String) ->
     let parsed = url::validate(&url)?;
     let domain = crate::domain::site_key(&parsed);
 
-    let sidecar = match state.sidecar.lock().await.clone() {
-        Some(s) => s,
-        None => {
-            let spawned = Arc::new(Sidecar::spawn(app, state.clone())?);
-            *state.sidecar.lock().await = Some(spawned.clone());
-            spawned
-        }
-    };
+    let sidecar = state.ensure_sidecar(app).await?;
 
     let paths = sidecar.paths().clone();
     std::fs::create_dir_all(&paths.auth_dir).ok();
@@ -297,7 +347,11 @@ async fn open_login_inner(app: &AppHandle, state: Arc<AppState>, url: String) ->
 // ---------------------------------------------------------------------------
 
 /// 处理一条来自 crawler 的消息，同时推送给前端。
-pub async fn handle_inbound(app: &AppHandle, state: &AppState, message: Inbound) {
+///
+/// 由 sidecar 的 stdout 读取协程**串行**调用，因此这里不能做任何会等待
+/// 后续入站消息的操作——否则读取协程会自我阻塞。需要等待应答的收尾工作
+/// （见 `finalize_run`）必须另起任务执行。
+pub async fn handle_inbound(app: &AppHandle, state: Arc<AppState>, message: Inbound) {
     match &message {
         Inbound::Result {
             key,
@@ -338,9 +392,24 @@ pub async fn handle_inbound(app: &AppHandle, state: &AppState, message: Inbound)
                     is_defense: error_kind.is_defense_mechanism(),
                 });
             }
+
+            state.log(
+                LogEntry::new("crawl-error")
+                    .url(url)
+                    .error(*error_kind)
+                    .state(message.clone()),
+            );
         }
         Inbound::Done { .. } => {
-            finalize_run(app, state).await;
+            // 必须另起任务执行收尾：finalize_run 会向 crawler 请求渲染 PDF
+            // 并等待应答，而应答只能由本读取协程处理。若在此直接 await，
+            // 读取协程会自我阻塞，PDF 输出将永久挂起。
+            state.log(LogEntry::new("crawl-done"));
+            let app = app.clone();
+            let state = Arc::clone(&state);
+            tauri::async_runtime::spawn(async move {
+                finalize_run(&app, &state).await;
+            });
         }
         Inbound::Pdf { id, pdf_base64 } => {
             let waiter = state.pdf_waiters.lock().await.remove(id);
@@ -420,6 +489,15 @@ async fn finalize_run(app: &AppHandle, state: &AppState) {
             "pdfs": pdf_results,
         }),
     );
+
+    state.log(
+        LogEntry::new("crawl-finished").state(format!(
+            "写出 {} 个文件，{} 个失败，{} 个 PDF",
+            outputs.len(),
+            failures.len(),
+            pdf_results.len()
+        )),
+    );
 }
 
 /// 请求 crawler 渲染 PDF 并等待结果。
@@ -464,6 +542,58 @@ fn task_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归测试：记录 `match mutex.lock().await.clone() { .. }` 的自死锁陷阱。
+    ///
+    /// `AppState::ensure_sidecar` 之所以必须写成「先取出锁值、再判断」，
+    /// 就是因为下面的写法会永久阻塞 —— match 的匹配对象是临时量，
+    /// 其生命周期延续到整个 match 表达式结束，因此 `None` 分支里的第二次
+    /// `lock()` 会等待一把永远不会释放的锁。
+    ///
+    /// 该缺陷曾导致首次抓取永久卡在「等待中」，且不产生任何错误提示。
+    #[tokio::test]
+    async fn 回归_match_分支内重复加锁会自死锁() {
+        use std::time::Duration;
+        use tokio::sync::Mutex;
+
+        let shared = Arc::new(Mutex::new(0u32));
+        let inner = Arc::clone(&shared);
+
+        let outcome = tokio::time::timeout(Duration::from_millis(200), async move {
+            match inner.lock().await.clone() {
+                _ => {
+                    *inner.lock().await = 1;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            outcome.is_err(),
+            "按 Rust 语义该写法应当自死锁；若此处不再超时，说明临时量生命周期规则有变，\
+             需要重新审视 ensure_sidecar 的写法"
+        );
+    }
+
+    /// 对照测试：先取出锁值、让守卫在语句结束时就释放，则不会死锁。
+    /// 这正是 `ensure_sidecar` 采用的写法。
+    #[tokio::test]
+    async fn 对照_先取出锁值再判断不会死锁() {
+        use std::time::Duration;
+        use tokio::sync::Mutex;
+
+        let shared = Arc::new(Mutex::new(0u32));
+        let inner = Arc::clone(&shared);
+
+        let outcome = tokio::time::timeout(Duration::from_millis(1000), async move {
+            let current = inner.lock().await.clone();
+            let _ = current;
+            *inner.lock().await = 1;
+        })
+        .await;
+
+        assert!(outcome.is_ok(), "先取出锁值的写法不应死锁");
+    }
 
     #[test]
     fn 校验并去重返回结构化结果() {

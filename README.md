@@ -304,38 +304,6 @@ MFA 绕过、访问控制绕过。
 
 ---
 
-## 与文档的技术栈差异
-
-以下条目偏离了 `WebScribe_CLAUDE_PROJECT_SPEC.pdf` 的原始要求，均经作者确认。
-
-| 项 | 文档要求 | 实际 | 原因 |
-|---|---|---|---|
-| 爬取架构 | §9.2 核心语言为 Rust | Rust 编排 + Node sidecar 爬取 | 经作者确认选用。目的是使用 §12/§13 点名的 `@mozilla/readability` 与 `turndown` 官方实现，而非其 Rust 移植版 |
-| 轻量化 | §8 减少常驻进程与依赖 | Portable 捆绑 Node 运行时（约 +90 MB） | 上述 sidecar 方案的必然代价 |
-| 浏览器运行时 | §11 需先确认分发方式 | 随 Portable ZIP 提供（约 +700 MB） | 经作者确认，以保证完全离线可用 |
-| 跨站并发 | §42 需先确认并发策略 | 同站串行 + 跨站并行（上限 3） | 经作者确认 |
-| sidecar 打包 | Tauri 官方指南推荐 `@yao-pkg/pkg` | 捆绑 `node.exe` + 明文 JS 文件 | pkg 的虚拟文件系统与 Playwright 的 `child_process` 驱动分叉存在已知冲突。Playwright 是 §10/§41/§58 的硬性要求，不宜为其牺牲 |
-| 正文首标题 | §33 文档结构 | 删除与文档标题重复的正文首标题 | Readability 会把正文 `h1` 映射为 `h2`，与本工具已在 `# 页面标题` 渲染的标题重复且层级失真。经作者确认按「还原原始层级并去重」处理 |
-| 许可证 | §4 不适用 MIT | 不创建 LICENSE 文件 | 作者尚未指定正式许可证，§4 禁止自行声明 |
-| 历史任务 / 缓存 / 数据库 | §43/§44 未确认 | 均不实现 | 经作者确认 |
-| 保存位置 | §31 需先确认实现方式 | Tauri 原生文件夹选择器 | 经作者确认，为 §31 列出的首选方案 |
-| 图片保存策略 | §34 需先确认 | 两种同时支持，由 UI 开关控制 | 经作者确认 |
-
-### 环境相关的实施记录
-
-| 项 | 情况 | 处理 |
-|---|---|---|
-| Rust 工具链下载 | 官方源实测约 224 B/s，不可用 | 经作者确认改用清华 TUNA 镜像 |
-| crates 依赖拉取 | 官方源实测约 5 KB/s 且稀疏索引不可达；清华只镜像索引 | 经作者确认改用 rsproxy.cn（实测约 131 KB/s），配置位于 `~/.cargo/config.toml`，不进入仓库 |
-| Playwright 浏览器下载 | 其内置下载器（基于 Node `https` 模块）在本机持续连接超时，而同地址用系统 HTTP 客户端可达 23 MB/s | `scripts/fetch-runtime.ps1` 先尝试官方安装器，失败则自动回退到手动下载解压，并写入 `INSTALLATION_COMPLETE` 标记 |
-| NSIS 运行时下载 | Tauri 打包时需从 GitHub Releases 取 `nsis-3.11.zip` 与 `nsis_tauri_utils.dll`，本机实测该域名直接超时 | `scripts/fetch-nsis.ps1` 经 GitHub 加速镜像下载并校验 SHA-1 后，按 Tauri 期望的布局预置到 `%LOCALAPPDATA%\tauri\NSIS`；`build-app.ps1` 会在缺失时自动调用 |
-| PowerShell 脚本编码 | Windows PowerShell 5.1 按 GBK 读取 UTF-8 脚本，导致中文乱码与语法错误 | `scripts/*.ps1` 均带 UTF-8 BOM |
-
-> 若您的网络可正常访问上述官方源，`fetch-runtime.ps1` 与 `fetch-nsis.ps1` 会自动走官方地址，
-> 无需任何额外配置；上述处理只在前者失败时生效。
-
----
-
 ## 许可证说明
 
 **本项目不适用 MIT License。**
