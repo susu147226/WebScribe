@@ -3,6 +3,7 @@ pub mod document;
 pub mod domain;
 pub mod error;
 pub mod logging;
+pub mod merge;
 pub mod naming;
 pub mod protocol;
 pub mod save;
@@ -35,6 +36,7 @@ pub fn run() {
             commands::environment_status,
             commands::start_crawl,
             commands::open_login,
+            commands::clear_merge_records,
         ])
         .run(tauri::generate_context!())
         .expect("WebScribe 启动失败");

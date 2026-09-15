@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -8,10 +8,11 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::error::{CrawlError, CrawlErrorKind, Result};
 use crate::logging::{LogEntry, Logger};
+use crate::merge::MergeRecord;
 use crate::protocol::{CrawlOptions, CrawlTarget, ImageStrategy, Inbound, Outbound, OutputFormat};
 use crate::sidecar::{RuntimePaths, Sidecar};
 use crate::task::{self, CrawlRun, FailureRecord, PdfJob};
-use crate::url::{self, UrlEntry};
+use crate::url;
 
 /// PDF 渲染结果。
 #[derive(Debug)]
@@ -97,51 +98,105 @@ impl AppState {
 // URL 校验
 // ---------------------------------------------------------------------------
 
+/// 单个输入行的校验结果。
+///
+/// 逐条返回而非只给一个总结果，界面才能对每一行分别标出「合法 / 非法原因 /
+/// 与第几条重复 / 将并入哪份文档」。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UrlCheck {
+    pub raw: String,
+    /// 规范化后的身份标识；非法或为空时为 None。
+    pub key: Option<String>,
+    /// 所属文档分组；非法或为空时为 None。同分组的条目会合并为一份文档。
+    pub doc_group: Option<String>,
+    /// 非法原因；合法时为 None。
+    pub error: Option<String>,
+    /// 与之重复的、首次出现的条目下标（从 0 起）；不重复时为 None。
+    pub duplicate_of: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UrlValidation {
-    /// 通过校验且去重后的条目，按输入顺序。
-    pub accepted: Vec<UrlEntry>,
-    /// 重复的条目及其对应的首个唯一条目下标。
-    pub duplicates: Vec<DuplicateEntry>,
+    pub checks: Vec<UrlCheck>,
+    /// 全局错误，例如超出单次任务的数量上限。
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DuplicateEntry {
-    pub raw: String,
-    pub duplicate_of: usize,
-}
-
-/// 校验并去重一批 URL。
+/// 逐条校验 URL。
 ///
-/// 文档第 16 条：超过 10 个必须报错，不得静默截断；第 17 条要求基本合法性
-/// 检查；第 18 条要求同任务内不得重复访问。
+/// 超出上限时仍返回全部行的校验结果，只把限制说明放进 `error` —— 界面需要
+/// 让用户看到究竟哪几行有问题，而不是整批失败、无从下手。
 #[tauri::command]
 pub fn validate_urls(urls: Vec<String>) -> UrlValidation {
-    match url::validate_and_dedup(&urls) {
-        Ok(outcome) => UrlValidation {
-            accepted: outcome.unique,
-            duplicates: outcome
-                .duplicates
-                .into_iter()
-                .map(|(entry, index)| DuplicateEntry {
-                    raw: entry.raw,
-                    duplicate_of: index,
-                })
-                .collect(),
-            error: None,
-        },
-        Err(e) => UrlValidation {
-            accepted: Vec::new(),
-            duplicates: Vec::new(),
-            error: Some(match e.detail {
-                Some(detail) => detail,
-                None => e.message,
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut checks = Vec::with_capacity(urls.len());
+    let mut unique_count = 0usize;
+
+    for raw in &urls {
+        let trimmed = raw.trim();
+
+        if trimmed.is_empty() {
+            checks.push(UrlCheck {
+                raw: raw.clone(),
+                key: None,
+                doc_group: None,
+                error: Some("尚未填写".into()),
+                duplicate_of: None,
+            });
+            continue;
+        }
+
+        let parsed = match url::validate(trimmed) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                checks.push(UrlCheck {
+                    raw: raw.clone(),
+                    key: None,
+                    doc_group: None,
+                    error: Some(e.detail.unwrap_or(e.message)),
+                    duplicate_of: None,
+                });
+                continue;
+            }
+        };
+
+        let key = url::normalize(&parsed);
+        let doc_group = url::doc_group(&parsed);
+
+        match seen.get(&key) {
+            Some(&index) => checks.push(UrlCheck {
+                raw: raw.clone(),
+                key: Some(key),
+                doc_group: Some(doc_group),
+                error: None,
+                duplicate_of: Some(index),
             }),
-        },
+            None => {
+                seen.insert(key.clone(), unique_count);
+                unique_count += 1;
+                checks.push(UrlCheck {
+                    raw: raw.clone(),
+                    key: Some(key),
+                    doc_group: Some(doc_group),
+                    error: None,
+                    duplicate_of: None,
+                });
+            }
+        }
     }
+
+    let error = if unique_count > url::MAX_URLS {
+        Some(format!(
+            "一次任务最多 {} 个 URL，当前有效条目有 {} 个。请删除多余项。",
+            url::MAX_URLS, unique_count
+        ))
+    } else {
+        None
+    };
+
+    UrlValidation { checks, error }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,11 +216,14 @@ pub struct EnvironmentStatus {
     pub problem: Option<String>,
     /// 结构化日志文件路径，便于排查问题时定位。
     pub log_path: Option<String>,
+    /// 当前版本号。取自 Cargo 包版本，界面标题直接展示，避免多处维护。
+    pub version: String,
 }
 
 #[tauri::command]
 pub fn environment_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> EnvironmentStatus {
     let log_path = state.log_path();
+    let version = env!("CARGO_PKG_VERSION").to_string();
 
     let Ok(paths) = RuntimePaths::resolve(&app) else {
         return EnvironmentStatus {
@@ -175,6 +233,7 @@ pub fn environment_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> En
             crawler_path: String::new(),
             problem: Some("无法解析运行时路径".into()),
             log_path,
+            version,
         };
     };
 
@@ -187,6 +246,7 @@ pub fn environment_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> En
         crawler_path: paths.crawler_entry.display().to_string(),
         problem,
         log_path,
+        version,
     }
 }
 
@@ -204,7 +264,15 @@ pub struct CrawlRequest {
     pub max_pagination: u32,
     pub separate_output: bool,
     pub obey_robots: bool,
+    /// 是否启用「相似链接合并为同一文档」。关闭时每个 URL 独立成文档，
+    /// 也不会读写合并记录。
+    #[serde(default = "default_true")]
+    pub merge_documents: bool,
     pub save_dir: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -213,6 +281,30 @@ pub struct StartOutcome {
     pub total: u32,
     /// 因重复而被跳过的条数。
     pub duplicates: u32,
+    /// 本次将追加到既有文档的文档分组数。
+    pub merging: u32,
+}
+
+/// 合并记录文件路径。
+fn merge_record_path(paths: &RuntimePaths) -> PathBuf {
+    paths.data_dir.join("merge-records.json")
+}
+
+/// 清除合并记录。之后所有任务都会新建文档。
+#[tauri::command]
+pub async fn clear_merge_records(
+    state: State<'_, Arc<AppState>>,
+) -> std::result::Result<u32, String> {
+    let sidecar = state.sidecar().await.map_err(|e| e.message_with_detail())?;
+    let path = merge_record_path(sidecar.paths());
+
+    let mut record = MergeRecord::load(&path);
+    let cleared = record.groups.len() as u32;
+    record.clear();
+    record.save(&path).map_err(|e| format!("清除合并记录失败：{e}"))?;
+
+    state.log(LogEntry::new("merge-records-cleared").state(cleared.to_string()));
+    Ok(cleared)
 }
 
 /// 启动一次抓取任务。
@@ -251,24 +343,39 @@ async fn start_crawl_inner(
 
     let paths = sidecar.paths().clone();
 
-    // 组装目标：注册域由 Rust 用 PSL 计算，crawler 直接复用，保证口径一致
-    let targets: Vec<CrawlTarget> = outcome
-        .unique
-        .iter()
-        .map(|entry| {
-            let site_key = url::validate(&entry.raw)
-                .map(|parsed| crate::domain::site_key(&parsed))
-                .unwrap_or_default();
-            CrawlTarget {
-                raw: entry.raw.clone(),
-                key: entry.key.clone(),
-                site_key,
+    // 组装目标：注册域由 Rust 用 PSL 计算，crawler 直接复用，保证口径一致。
+    // 同时记录每个 URL 所属的文档分组，供结果归并使用。
+    let mut group_by_key: HashMap<String, String> = HashMap::new();
+    let mut targets: Vec<CrawlTarget> = Vec::with_capacity(outcome.unique.len());
+
+    for entry in &outcome.unique {
+        let parsed = url::validate(&entry.raw)?;
+        let group = url::doc_group(&parsed);
+
+        group_by_key.insert(entry.key.clone(), group);
+
+        targets.push(CrawlTarget {
+            raw: entry.raw.clone(),
+            key: entry.key.clone(),
+            site_key: crate::domain::site_key(&parsed),
+        });
+    }
+
+    // 命中合并记录、且上次的文件仍在时，本次改为追加到该文件
+    let record_path = merge_record_path(&paths);
+    let mut append_targets: HashMap<String, PathBuf> = HashMap::new();
+    if request.merge_documents {
+        let record = MergeRecord::load(&record_path);
+        for group in group_by_key.values() {
+            if let Some(file) = record.existing_file(group) {
+                append_targets.insert(group.clone(), file);
             }
-        })
-        .collect();
+        }
+    }
 
     let duplicate_count = outcome.duplicates.len() as u32;
     let total = targets.len() as u32;
+    let merging = append_targets.len() as u32;
 
     // 清理上一次的暂存图片，避免残留文件被误引用
     let _ = std::fs::remove_dir_all(paths.staging_dir.join("assets"));
@@ -278,7 +385,11 @@ async fn start_crawl_inner(
         save_dir,
         options.clone(),
         paths.staging_dir.clone(),
+        group_by_key,
+        append_targets,
     );
+    let mut run = run;
+    run.merge_enabled = request.merge_documents;
     let run = Arc::new(Mutex::new(run));
     *state.run.lock().await = Some(run.clone());
 
@@ -292,14 +403,14 @@ async fn start_crawl_inner(
         })
         .await?;
 
-    state.log(
-        LogEntry::new("crawl-started")
-            .state(format!("{total} 个 URL（跳过 {duplicate_count} 个重复）")),
-    );
+    state.log(LogEntry::new("crawl-started").state(format!(
+        "{total} 个 URL（跳过 {duplicate_count} 个重复，{merging} 份文档将追加）"
+    )));
 
     Ok(StartOutcome {
         total,
         duplicates: duplicate_count,
+        merging,
     })
 }
 
@@ -442,9 +553,10 @@ async fn finalize_run(app: &AppHandle, state: &AppState) {
         return;
     };
 
-    let (outputs, failures, pdf_jobs) = {
-        let run = run.lock().await;
-        let outputs = match run.write_outputs() {
+    let (outcome, failures, merge_enabled) = {
+        let guard = run.lock().await;
+
+        let outcome = match guard.write_outputs() {
             Ok(o) => o,
             Err(e) => {
                 let _ = app.emit(
@@ -454,8 +566,30 @@ async fn finalize_run(app: &AppHandle, state: &AppState) {
                 return;
             }
         };
-        (outputs, run.failures.clone(), run.pdf_jobs())
+
+        (outcome, guard.failures.clone(), guard.merge_enabled)
     };
+
+    // 更新合并记录：记住「文档分组 → 产出文件」，供下次任务判断是追加还是新建
+    if merge_enabled {
+        if let Ok(sidecar) = state.sidecar().await {
+            let path = merge_record_path(sidecar.paths());
+            let mut record = MergeRecord::load(&path);
+
+            for file in &outcome.files {
+                if let Some(markdown) = &file.markdown_path {
+                    record.remember(&file.group, Path::new(markdown), &file.title);
+                }
+            }
+
+            if let Err(e) = record.save(&path) {
+                eprintln!("[WebScribe] 合并记录写入失败：{e}");
+            }
+        }
+    }
+
+    let outputs = outcome.files;
+    let pdf_jobs = outcome.pdf_jobs;
 
     let mut pdf_results = Vec::new();
     for job in pdf_jobs {
@@ -596,31 +730,89 @@ mod tests {
     }
 
     #[test]
-    fn 校验并去重返回结构化结果() {
+    fn 逐条校验并标出重复项() {
         let result = validate_urls(vec![
             "https://example.com/a".into(),
             "https://EXAMPLE.com/a/".into(),
             "https://example.com/b".into(),
         ]);
+
         assert!(result.error.is_none());
-        assert_eq!(result.accepted.len(), 2);
-        assert_eq!(result.duplicates.len(), 1);
-        assert_eq!(result.duplicates[0].duplicate_of, 0);
+        assert_eq!(result.checks.len(), 3, "每一行都应有一条结果");
+
+        // 第 2 行规范化后与第 1 行相同，标为重复
+        assert_eq!(result.checks[1].duplicate_of, Some(0));
+        assert!(result.checks[0].duplicate_of.is_none());
+        assert!(result.checks[2].duplicate_of.is_none());
+
+        // 合法行带出规范化 key 与文档分组
+        assert_eq!(result.checks[0].key.as_deref(), Some("https://example.com/a"));
+        assert_eq!(result.checks[0].doc_group.as_deref(), Some("example.com"));
     }
 
     #[test]
-    fn 超过十个_url_返回错误而非截断() {
+    fn 非法行带出具体原因且不影响其它行() {
+        let result = validate_urls(vec![
+            "https://example.com/a".into(),
+            "这不是URL".into(),
+            "https://example.com/b".into(),
+        ]);
+
+        assert!(result.checks[0].error.is_none());
+        assert!(result.checks[1].error.is_some(), "非法行应给出原因");
+        assert!(result.checks[1].key.is_none());
+        assert!(result.checks[2].error.is_none(), "后续合法行不应受牵连");
+    }
+
+    #[test]
+    fn 空行被标记为尚未填写() {
+        let result = validate_urls(vec!["".into(), "   ".into()]);
+        assert_eq!(result.checks.len(), 2);
+        for check in &result.checks {
+            assert!(check.error.as_deref().unwrap_or_default().contains("尚未填写"));
+        }
+    }
+
+    #[test]
+    fn 超出上限时仍返回逐行结果() {
         let urls: Vec<String> = (0..11).map(|i| format!("https://example.com/{i}")).collect();
         let result = validate_urls(urls);
+
+        // 文档要求不得静默截断：既要给出全局错误，也要保留每一行的结果
         assert!(result.error.is_some());
-        assert!(result.accepted.is_empty());
         assert!(result.error.unwrap().contains("11"));
+        assert_eq!(result.checks.len(), 11, "全部行都应保留以便用户逐条处理");
     }
 
     #[test]
-    fn 非法_url_返回错误() {
-        let result = validate_urls(vec!["不是URL".into()]);
-        assert!(result.error.is_some());
+    fn 恰好十个不报错() {
+        let urls: Vec<String> = (0..10).map(|i| format!("https://example.com/{i}")).collect();
+        let result = validate_urls(urls);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn 重复项不计入上限() {
+        // 10 个唯一 + 1 个重复，仍应通过
+        let mut urls: Vec<String> = (0..10).map(|i| format!("https://example.com/{i}")).collect();
+        urls.push("https://example.com/0".into());
+
+        let result = validate_urls(urls);
+        assert!(result.error.is_none(), "重复项不应占用名额");
+        assert_eq!(result.checks[10].duplicate_of, Some(0));
+    }
+
+    #[test]
+    fn 逐条结果带出文档分组() {
+        let result = validate_urls(vec![
+            "https://example.com/docs/a/chapter-1".into(),
+            "https://example.com/docs/a/chapter-2".into(),
+        ]);
+
+        let first = result.checks[0].doc_group.clone().unwrap();
+        let second = result.checks[1].doc_group.clone().unwrap();
+        assert_eq!(first, second, "同目录下的章节应归为同一文档分组");
+        assert_eq!(first, "example.com/docs/a");
     }
 
     #[test]

@@ -1,0 +1,116 @@
+WebScribe 许可证
+=================
+
+版权所有 © 2026 云舒眠眠（下称「作者」）。保留所有权利。
+
+项目仓库：https://github.com/susu147226/WebScribe
+
+本许可证不是 OSI（Open Source Initiative）认可的开源许可证。WebScribe
+是「源码可见」的专有软件，而非开源软件。
+
+
+一、定义
+--------
+
+「本软件」指 WebScribe 项目的全部源代码、文档、构建脚本、配置与随附资源。
+
+「个人非商业用途」指您作为自然人，为学习、研究或个人事务处理之目的，
+在自己的设备上运行本软件，并可为本机使用之需要修改其源代码。
+
+「商业用途」指任何以营利为目的，或由营利性主体开展的使用，包括但不限于：
+在产品或服务中使用本软件或其主要部分；用于向客户交付的收费服务；
+在商业组织中部署以支持经营活动；用于商业培训或付费咨询。
+
+「再分发」指将本软件或其修改版本以任何形式提供给作者与您之外的第三方，
+包括但不限于：上传至公开或私有代码托管平台；随产品、安装包或镜像分发；
+通过网盘、即时通讯、论坛、博客等渠道传播；以预装形式随硬件或系统交付。
+
+
+二、您被许可的行为
+------------------
+
+在遵守本许可证全部条款的前提下，作者授予您一项非独占、不可转让、可撤销的
+许可，允许您：
+
+1. 获取、阅读、编译本软件的源代码；
+2. 在您的个人设备上安装并运行本软件，用于个人非商业用途；
+3. 为本机个人使用之需要修改本软件的源代码。
+
+依本许可证取得的权利仅授予您本人，不得转让给他人。
+
+
+三、您被禁止的行为
+------------------
+
+未经作者事先书面许可，您不得：
+
+1. 将本软件或其任何部分用于商业用途；
+2. 再分发本软件，无论是否经过修改，无论是否收费；
+3. 将本软件或其修改版本作为您自己或他人的作品发布；
+4. 移除、遮蔽或篡改本软件中的版权声明、作者署名或本许可证文本；
+5. 将本软件或其衍生作品以其他许可证重新授权。
+
+「未经许可，禁止商用传播」是本许可证的核心限制。如需上述任何一项授权，
+请通过项目仓库与作者联系。
+
+
+四、必须保留的声明
+------------------
+
+本软件的源代码、文档与二进制分发物中均包含版权声明。您在任何情况下
+都不得移除或修改这些声明。
+
+
+五、第三方组件
+--------------
+
+本软件使用了若干遵循各自许可证的第三方开源组件，清单见 README 的
+「许可与致谢」一节。这些组件不受本许可证约束，其使用条件以各自的
+许可证为准。本许可证仅约束 WebScribe 项目自身的代码与文档。
+
+
+六、终止
+--------
+
+您一旦违反本许可证的任何条款，本许可证授予您的全部权利立即自动终止。
+终止后，您应当停止使用本软件，并删除您持有的全部副本（含修改版本）。
+作者保留追究相应责任的权利。
+
+
+七、免责声明
+------------
+
+本软件按「现状」提供，不附带任何明示或默示的担保，包括但不限于对
+适销性、特定用途适用性及不侵权的担保。在任何情况下，作者均不对因
+使用或无法使用本软件而产生的任何直接、间接、附带、特殊或后果性损害
+承担责任。
+
+使用者应自行确保其使用行为符合所访问网站的服务条款及适用法律法规。
+本软件不提供任何绕过网站防护机制的能力，亦不得被用于此类目的。
+
+
+--------------------------------------------------------------------------
+
+
+English Summary (Non-binding)
+-----------------------------
+
+Copyright (c) 2026 云舒眠眠. All rights reserved.
+
+Repository: https://github.com/susu147226/WebScribe
+
+This is NOT an open source license and is not approved by the OSI.
+
+You MAY, for personal, non-commercial purposes only, read, build, run and
+modify this software on your own devices.
+
+You MAY NOT, without the author's prior written permission:
+  - use this software for any commercial purpose;
+  - redistribute this software or any modified version of it, in any form;
+  - remove or alter the copyright notices or this license text;
+  - relicense this software or any derivative work under another license.
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+The Chinese text above is the authoritative version; this English summary is
+provided for convenience only and has no legal effect.

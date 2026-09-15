@@ -11,7 +11,7 @@ import type {
 
 /** 与 Rust 侧 `commands.rs` 暴露的 Tauri 命令一一对应。 */
 
-/** 校验并去重 URL 列表（文档第 16、17、18 条）。 */
+/** 逐条校验 URL。返回与输入行一一对应的结果。 */
 export function validateUrls(urls: string[]): Promise<UrlValidation> {
   return invoke<UrlValidation>("validate_urls", { urls });
 }
@@ -26,9 +26,18 @@ export function startCrawl(request: CrawlRequest): Promise<StartOutcome> {
   return invoke<StartOutcome>("start_crawl", { request });
 }
 
-/** 打开有头浏览器供用户自行登录（文档第 28、29 条）。 */
+/** 打开有头浏览器供用户自行登录。 */
 export function openLogin(url: string): Promise<void> {
   return invoke<void>("open_login", { url });
+}
+
+/**
+ * 清除合并记录。之后所有任务都会新建文档，不再追加到既有文件。
+ *
+ * @returns 被清除的记录条数
+ */
+export function clearMergeRecords(): Promise<number> {
+  return invoke<number>("clear_merge_records");
 }
 
 /**

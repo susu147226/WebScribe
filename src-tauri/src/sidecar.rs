@@ -22,10 +22,12 @@ pub struct RuntimePaths {
     pub crawler_entry: PathBuf,
     /// Playwright 浏览器目录，通过 PLAYWRIGHT_BROWSERS_PATH 告知 crawler。
     pub browsers_dir: PathBuf,
-    /// 登录态目录（文档第 30 条要求加入 .gitignore）。
+    /// 登录态目录（已加入 .gitignore）。
     pub auth_dir: PathBuf,
     /// 图片暂存目录。
     pub staging_dir: PathBuf,
+    /// 应用数据根目录。合并记录等本地状态放在这里。
+    pub data_dir: PathBuf,
 }
 
 impl RuntimePaths {
@@ -65,6 +67,7 @@ impl RuntimePaths {
             browsers_dir: root.join("runtime").join("browsers"),
             auth_dir: app_data.join("auth"),
             staging_dir: app_data.join("staging"),
+            data_dir: app_data,
         })
     }
 

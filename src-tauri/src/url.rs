@@ -91,6 +91,32 @@ pub fn normalize(url: &Url) -> String {
     out
 }
 
+/// 计算 URL 所属的「文档分组」。
+///
+/// 判据（经作者确认）：**同主机 + 路径去掉最后一段后相同**，即认为它们属于
+/// 同一套文档的不同章节，抓取结果应合并为一份文档。
+///
+/// 例如下列 URL 同属分组 `developer.huawei.com/consumer/cn/doc/content`：
+///
+/// - `.../doc/content/themes-engine-next-base-globalvar-0000002471235030`
+/// - `.../doc/content/themes-engine-next-base-touch-0000002471235031`
+///
+/// 路径只有一段时（如 `https://example.com/a`）前缀为空，整个主机归为一组；
+/// 这会把同一站点的多个顶级页面合并为一份文档，属于该规则的既定含义，
+/// 界面上会逐条显示所属分组，便于用户确认。
+pub fn doc_group(url: &Url) -> String {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let path = url.path().trim_end_matches('/');
+
+    let prefix = match path.rfind('/') {
+        // 路径只有一段（`/a`）或为空时没有前缀
+        Some(0) | None => "",
+        Some(index) => &path[..index],
+    };
+
+    format!("{host}{prefix}")
+}
+
 /// 查重结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DedupOutcome {
@@ -292,5 +318,84 @@ mod tests {
             "这不是URL".to_string(),
         ];
         assert!(validate_and_dedup(&input).is_err());
+    }
+
+    // ---- 文档分组 ----
+
+    fn group(s: &str) -> String {
+        doc_group(&validate(s).unwrap())
+    }
+
+    #[test]
+    fn 同一目录下的不同章节归为同一分组() {
+        let expected = "developer.huawei.com/consumer/cn/doc/content";
+        assert_eq!(
+            group("https://developer.huawei.com/consumer/cn/doc/content/themes-engine-next-base-globalvar-0000002471235030"),
+            expected
+        );
+        assert_eq!(
+            group("https://developer.huawei.com/consumer/cn/doc/content/themes-engine-next-base-touch-0000002471235031"),
+            expected
+        );
+    }
+
+    #[test]
+    fn 不同目录归为不同分组() {
+        assert_ne!(
+            group("https://example.com/docs/a/chapter-1"),
+            group("https://example.com/blog/a/post-1")
+        );
+    }
+
+    #[test]
+    fn 不同主机归为不同分组() {
+        assert_ne!(group("https://a.com/docs/x"), group("https://b.com/docs/x"));
+    }
+
+    #[test]
+    fn 路径只有一段时整个主机归为一组() {
+        assert_eq!(group("https://example.com/a"), "example.com");
+        assert_eq!(group("https://example.com/b"), "example.com");
+    }
+
+    #[test]
+    fn 根路径归为整个主机一组() {
+        assert_eq!(group("https://example.com/"), "example.com");
+        assert_eq!(group("https://example.com"), "example.com");
+    }
+
+    #[test]
+    fn 末尾斜杠不影响分组() {
+        assert_eq!(
+            group("https://example.com/docs/a/"),
+            group("https://example.com/docs/b")
+        );
+    }
+
+    #[test]
+    fn 查询串与_fragment_不影响分组() {
+        let base = group("https://example.com/docs/a");
+        assert_eq!(group("https://example.com/docs/a?page=1"), base);
+        assert_eq!(group("https://example.com/docs/a#sec"), base);
+    }
+
+    #[test]
+    fn 多层路径只去掉最后一段() {
+        assert_eq!(group("https://example.com/a/b/c"), "example.com/a/b");
+        assert_eq!(group("https://example.com/a/b"), "example.com/a");
+    }
+
+    #[test]
+    fn 主机大小写不影响分组() {
+        assert_eq!(group("https://EXAMPLE.com/docs/a"), group("https://example.com/docs/b"));
+    }
+
+    #[test]
+    fn 分组与站点分组是不同概念() {
+        // 站点分组看注册域，文档分组看主机 + 路径前缀
+        let a = validate("https://www.example.com/docs/a").unwrap();
+        let b = validate("https://docs.example.com/guide/b").unwrap();
+        assert_eq!(crate::domain::site_key(&a), crate::domain::site_key(&b));
+        assert_ne!(doc_group(&a), doc_group(&b));
     }
 }

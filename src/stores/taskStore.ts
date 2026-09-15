@@ -1,8 +1,9 @@
 import { create } from "zustand";
 
-import { mergeUrls, parseUrls } from "../services/urlInput";
 import { createPendingRows } from "../services/taskRows";
+import { mergeEntries, splitUrls } from "../services/urlInput";
 import {
+  clearMergeRecords,
   environmentStatus,
   onCrawlerEvent,
   openLogin,
@@ -23,7 +24,11 @@ import {
   type ProgressPayload,
   type TaskRow,
   type TaskState,
+  type UrlCheck,
 } from "../types";
+
+/** 输入校验的防抖时长。逐字符校验既无必要也会造成闪烁。 */
+const VALIDATE_DEBOUNCE_MS = 250;
 
 export interface LogLine {
   level: "info" | "warn" | "error";
@@ -33,7 +38,15 @@ export interface LogLine {
 
 interface TaskStore {
   // ---- 输入 ----
-  urlsText: string;
+  /** 逐条 URL，界面上一条一行。 */
+  urlEntries: string[];
+  /** 与 `urlEntries` 一一对应的校验结果。长度可能暂时落后于输入。 */
+  urlChecks: UrlCheck[];
+  /** 全局校验错误，例如超出数量上限。 */
+  checkError: string | null;
+  /** 批量粘贴框的内容。粘贴后即清空，不作为长期状态。 */
+  pasteInput: string;
+
   saveDir: string;
   format: OutputFormat;
   imageStrategy: ImageStrategy;
@@ -41,6 +54,7 @@ interface TaskStore {
   maxPagination: number;
   separateOutput: boolean;
   obeyRobots: boolean;
+  mergeDocuments: boolean;
 
   // ---- 运行状态 ----
   tasks: TaskRow[];
@@ -53,9 +67,14 @@ interface TaskStore {
   loginDomain: string | null;
 
   // ---- 动作 ----
-  setUrlsText: (value: string) => void;
-  appendUrls: (value: string) => void;
-  clearUrls: () => void;
+  setPasteInput: (value: string) => void;
+  addFromText: (value: string) => void;
+  setEntry: (index: number, value: string) => void;
+  removeEntry: (index: number) => void;
+  addBlankEntry: () => void;
+  clearEntries: () => void;
+  revalidate: () => void;
+
   setSaveDir: (value: string) => void;
   chooseSaveDir: () => Promise<void>;
   setFormat: (value: OutputFormat) => void;
@@ -64,6 +83,8 @@ interface TaskStore {
   setMaxPagination: (value: number) => void;
   setSeparateOutput: (value: boolean) => void;
   setObeyRobots: (value: boolean) => void;
+  setMergeDocuments: (value: boolean) => void;
+  resetMergeRecords: () => Promise<void>;
 
   refreshEnvironment: () => Promise<void>;
   run: () => Promise<void>;
@@ -76,8 +97,29 @@ function nowLabel(): string {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
 
+/** 只有当校验结果确实发生变化时才写回，避免无谓的重渲染。 */
+function checksEqual(a: readonly UrlCheck[], b: readonly UrlCheck[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((left, i) => {
+    const right = b[i];
+    return (
+      left.raw === right.raw &&
+      left.key === right.key &&
+      left.docGroup === right.docGroup &&
+      left.error === right.error &&
+      left.duplicateOf === right.duplicateOf
+    );
+  });
+}
+
+let validateTimer: ReturnType<typeof setTimeout> | undefined;
+
 export const useTaskStore = create<TaskStore>()((set, get) => ({
-  urlsText: "",
+  urlEntries: [],
+  urlChecks: [],
+  checkError: null,
+  pasteInput: "",
+
   saveDir: "",
   format: "markdown",
   imageStrategy: "remote",
@@ -85,6 +127,7 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
   maxPagination: MAX_PAGINATION,
   separateOutput: false,
   obeyRobots: true,
+  mergeDocuments: true,
 
   tasks: [],
   running: false,
@@ -95,23 +138,77 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
   loginBusy: false,
   loginDomain: null,
 
-  setUrlsText: (value) => set({ urlsText: value, validationError: null }),
+  setPasteInput: (value) => set({ pasteInput: value }),
 
-  appendUrls: (value) => {
-    // 文档第 16 条：超过 10 个必须提示，不得静默截断
-    const { urls, overLimit } = mergeUrls(get().urlsText, value, MAX_URLS);
+  addFromText: (value) => {
+    const { entries, overLimit } = mergeEntries(get().urlEntries, value, MAX_URLS);
 
-    if (overLimit) {
-      set({
-        urlsText: urls.join("\n"),
-        validationError: `一次任务最多 ${MAX_URLS} 个 URL，当前已有 ${urls.length} 个。请删除多余项后再开始抓取。`,
-      });
-      return;
-    }
-    set({ urlsText: urls.join("\n"), validationError: null });
+    set({
+      urlEntries: entries,
+      pasteInput: "",
+      validationError: overLimit
+        ? `一次任务最多 ${MAX_URLS} 个 URL，当前有 ${entries.length} 个。请删除多余项。`
+        : null,
+    });
+
+    get().revalidate();
   },
 
-  clearUrls: () => set({ urlsText: "", validationError: null }),
+  setEntry: (index, value) => {
+    const entries = [...get().urlEntries];
+    if (index < 0 || index >= entries.length) return;
+    entries[index] = value;
+
+    // 只改内容，不因换行再拆分 —— 用户可能正在逐字输入
+    set({ urlEntries: entries, validationError: null });
+    get().revalidate();
+  },
+
+  removeEntry: (index) => {
+    const entries = get().urlEntries.filter((_, i) => i !== index);
+    set({ urlEntries: entries, validationError: null });
+    get().revalidate();
+  },
+
+  addBlankEntry: () => {
+    const entries = get().urlEntries;
+    if (entries.length >= MAX_URLS) {
+      set({ validationError: `一次任务最多 ${MAX_URLS} 个 URL。` });
+      return;
+    }
+    set({ urlEntries: [...entries, ""], validationError: null });
+    get().revalidate();
+  },
+
+  clearEntries: () => {
+    set({ urlEntries: [], pasteInput: "", urlChecks: [], checkError: null, validationError: null });
+  },
+
+  /** 请求主程序逐条校验。带防抖，避免连续输入时反复往返。 */
+  revalidate: () => {
+    if (validateTimer) clearTimeout(validateTimer);
+
+    validateTimer = setTimeout(() => {
+      const entries = get().urlEntries;
+      if (entries.length === 0) {
+        set({ urlChecks: [], checkError: null });
+        return;
+      }
+
+      void validateUrls(entries)
+        .then((result) => {
+          // 校验期间输入可能又变了，丢弃过期结果
+          if (!entriesEqual(get().urlEntries, entries)) return;
+          if (checksEqual(get().urlChecks, result.checks) && get().checkError === result.error) {
+            return;
+          }
+          set({ urlChecks: result.checks, checkError: result.error });
+        })
+        .catch(() => {
+          // 校验失败不应打断输入，下一轮会再试
+        });
+    }, VALIDATE_DEBOUNCE_MS);
+  },
 
   setSaveDir: (value) => set({ saveDir: value }),
 
@@ -127,6 +224,21 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
     set({ maxPagination: Math.min(Math.max(1, value), MAX_PAGINATION) }),
   setSeparateOutput: (value) => set({ separateOutput: value }),
   setObeyRobots: (value) => set({ obeyRobots: value }),
+  setMergeDocuments: (value) => set({ mergeDocuments: value }),
+
+  resetMergeRecords: async () => {
+    try {
+      const cleared = await clearMergeRecords();
+      set({
+        notice:
+          cleared > 0
+            ? `已清除 ${cleared} 条合并记录，下次抓取会新建文档。`
+            : "没有可清除的合并记录。",
+      });
+    } catch (error) {
+      set({ notice: `清除合并记录失败：${String(error)}` });
+    }
+  },
 
   refreshEnvironment: async () => {
     try {
@@ -138,16 +250,10 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
 
   run: async () => {
     const state = get();
-    const urls = parseUrls(state.urlsText);
+    const urls = state.urlEntries.map((entry) => entry.trim()).filter(Boolean);
 
     if (urls.length === 0) {
       set({ validationError: "请至少输入一个 URL。" });
-      return;
-    }
-    if (urls.length > MAX_URLS) {
-      set({
-        validationError: `一次任务最多 ${MAX_URLS} 个 URL，当前提供了 ${urls.length} 个。`,
-      });
       return;
     }
     if (!state.saveDir.trim()) {
@@ -155,32 +261,43 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
       return;
     }
 
-    // 先由 Rust 侧做权威校验与去重，再决定是否启动
+    // 以主程序的校验结果为准，界面上的结果可能尚未刷新
     let validation;
     try {
-      validation = await validateUrls(urls);
+      validation = await validateUrls(state.urlEntries);
     } catch (error) {
       set({ validationError: `URL 校验失败：${String(error)}` });
       return;
     }
+
+    set({ urlChecks: validation.checks, checkError: validation.error });
 
     if (validation.error) {
       set({ validationError: validation.error });
       return;
     }
 
-    const duplicateCount = validation.duplicates.length;
+    const invalid = validation.checks.filter((check) => check.error !== null);
+    if (invalid.length > 0) {
+      set({ validationError: `第 ${validation.checks.indexOf(invalid[0]) + 1} 行尚未填写或格式不正确。` });
+      return;
+    }
+
+    const duplicateCount = validation.checks.filter((c) => c.duplicateOf !== null).length;
     const notice =
       duplicateCount > 0
-        ? `已跳过 ${duplicateCount} 个重复 URL，实际抓取 ${validation.accepted.length} 个。`
+        ? `已跳过 ${duplicateCount} 个重复 URL，实际抓取 ${validation.checks.length - duplicateCount} 个。`
         : null;
 
     set({
       validationError: null,
       notice,
       running: true,
-      // key 必须来自 Rust 规范化后的值，不能用原始输入 —— 见 taskRows.ts 说明
-      tasks: createPendingRows(validation.accepted),
+      tasks: createPendingRows(
+        validation.checks
+          .filter((check) => check.duplicateOf === null && check.key !== null)
+          .map((check) => ({ key: check.key as string, raw: check.raw })),
+      ),
       logs: [],
     });
 
@@ -192,11 +309,17 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
       maxPagination: state.maxPagination,
       separateOutput: state.separateOutput,
       obeyRobots: state.obeyRobots,
+      mergeDocuments: state.mergeDocuments,
       saveDir: state.saveDir,
     };
 
     try {
-      await startCrawl(request);
+      const outcome = await startCrawl(request);
+      if (outcome.merging > 0) {
+        set({
+          notice: `${notice ? `${notice} ` : ""}其中 ${outcome.merging} 份文档将追加到已有文件。`,
+        });
+      }
     } catch (error) {
       set({ running: false, notice: `启动抓取失败：${String(error)}` });
     }
@@ -204,15 +327,15 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
 
   login: async () => {
     const state = get();
-    const urls = parseUrls(state.urlsText);
-    if (urls.length === 0) {
+    const first = state.urlEntries.find((entry) => entry.trim().length > 0);
+    if (!first) {
       set({ validationError: "请先在 URL 列表中填写要登录的站点地址。" });
       return;
     }
 
     set({ loginBusy: true, validationError: null });
     try {
-      await openLogin(urls[0]);
+      await openLogin(first);
     } catch (error) {
       set({ loginBusy: false, notice: `打开登录窗口失败：${String(error)}` });
     }
@@ -293,9 +416,11 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
           }
 
           const pdfByKey = new Map(payload.pdfs);
+          const appended = payload.outputs.filter((o) => o.appended).length;
 
           return {
             running: false,
+            notice: appended > 0 ? `${appended} 份文档已追加到已有文件。` : state.notice,
             tasks: state.tasks.map((task) => {
               const files = outputsByKey.get(task.key) ?? [];
               const extraPdf = pdfByKey.get(task.key);
@@ -316,7 +441,11 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
         set((state) => ({
           logs: [
             ...state.logs,
-            { level: "error", message: `PDF 生成失败（${payload.id}）：${payload.message}`, at: nowLabel() },
+            {
+              level: "error",
+              message: `PDF 生成失败（${payload.id}）：${payload.message}`,
+              at: nowLabel(),
+            },
           ],
         }));
       }),
@@ -331,7 +460,10 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
       ),
 
       onCrawlerEvent<{ domain: string }>("crawler://login-opened", (payload) => {
-        set({ loginDomain: payload.domain, notice: `已打开浏览器，请在窗口中自行完成登录：${payload.domain}` });
+        set({
+          loginDomain: payload.domain,
+          notice: `已打开浏览器，请在窗口中自行完成登录：${payload.domain}`,
+        });
       }),
 
       onCrawlerEvent<{ domain: string }>("crawler://login-saved", (payload) => {
@@ -356,3 +488,9 @@ export const useTaskStore = create<TaskStore>()((set, get) => ({
 
   dismissNotice: () => set({ notice: null, validationError: null }),
 }));
+
+function entriesEqual(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+export { splitUrls };

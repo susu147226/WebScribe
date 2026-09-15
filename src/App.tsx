@@ -25,6 +25,7 @@ export default function App() {
     <div className="app">
       <header className="app__header">
         <h1 className="app__title">WebScribe</h1>
+        {env?.version && <span className="app__version">v{env.version}</span>}
         <span className="app__subtitle">网页文档抓取与 Markdown / PDF 转存</span>
 
         <div className="app__env">

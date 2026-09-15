@@ -1,11 +1,12 @@
 [package]
 name = "webscribe"
-version = "0.1.1"
+version = "0.1.2"
 description = "轻量级网页文档抓取、整理与 Markdown/PDF 转存工具"
 authors = ["云舒眠眠"]
 edition = "2021"
-# 文档第 4 条：不得在项目元数据中声明 MIT，亦不得自行声明其他开源许可证。
-# 作者尚未指定正式许可证，故此处不设置 license / license-file 字段。
+# 本项目采用自定义的专有许可证，非 OSI 认可的开源许可证。
+# 条款见仓库根目录的 LICENSE 文件。
+license-file = "../LICENSE"
 publish = false
 
 [lib]
