@@ -171,7 +171,7 @@ export const MAX_PAGINATION = 5;
  * 链接数量档位的兜底值，仅在尚未从主程序取到档位时使用。
  * 正常运行时以 `EnvironmentStatus.linkLimitTiers` 为准，避免两边各写一份而漂移。
  */
-export const FALLBACK_LINK_LIMIT_TIERS = [10, 50, 100];
+export const FALLBACK_LINK_LIMIT_TIERS = [10, 50, 100, 150, 200];
 
 /** 状态的中文说明，用于兜底展示。 */
 export const STATE_LABELS: Record<TaskState, string> = {

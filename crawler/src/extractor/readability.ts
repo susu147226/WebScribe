@@ -131,22 +131,111 @@ export function leadingHeadingText(contentHtml: string): string {
 }
 
 /**
- * 取页面自己的标题——文档中的 `<h1>`。
+ * 判断某个 class / id 标记是否属于「标题」命名。
  *
- * **为什么必须在 Readability 之前取：** 不少文档站（OPPO、vivo 的开放平台等）把
- * 每个页面的 `<title>` 都写成站点级的固定文案，例如每一页都是
- * `OPPO 开放平台-OPPO开发者服务中心`；页面真正的名字在正文的 `<h1>` 里。
+ * 命中 `title`、`doc-title`、`article_title`、`title-wrap` 这类写法；
+ * `subtitle`、`titled` 之类不算 —— 它们不是标题本身。
+ */
+function isTitleToken(token: string): boolean {
+  return /(^|[-_])title([-_]|$)/i.test(token.trim());
+}
+
+/** 元素是否位于站点外壳里 —— 那里的「标题」不是文章标题。 */
+const CHROME_TAGS = "nav, header, footer, aside";
+
+/**
+ * 标记名里带这些词的，属于站点外壳：导航、菜单、页头页脚、弹窗等。
  *
- * 而 Readability 的 `_headerDuplicatesTitle` 会用 0.75 的文本相似度阈值判断
- * 「这个标题与文章标题重复」，把这类 h1 一并删除——`OPPO开发者服务协议` 与
- * `OPPO 开放平台-OPPO开发者服务中心` 因共享 `OPPO`、`开发者` 等词而被误判。
+ * 只看标签名不够：荣耀的文档站把页头写成 `<div id="header">`、导航项写成
+ * `<div class="title">` 挂在 `.menu-title` 下，全是 class/id，标签层面看不出来。
+ */
+const CHROME_MARKERS =
+  /(^|[-_])(nav|navbar|menu|sidebar|side|aside|header|footer|foot|dialog|modal|toolbar|breadcrumb|crumb|tab|pager|pagination)([-_]|$)/i;
+
+function insideSiteChrome(element: Element): boolean {
+  const body = element.ownerDocument.body;
+  let current: Element | null = element;
+
+  while (current && current !== body) {
+    if (current.matches(CHROME_TAGS)) return true;
+
+    const markers = [...current.classList, current.getAttribute("id") ?? ""];
+    if (markers.some((marker) => CHROME_MARKERS.test(marker))) return true;
+
+    current = current.parentElement;
+  }
+
+  return false;
+}
+
+/**
+ * 取页面自己的标题。
+ *
+ * **为什么要按结构判断，而不是只看标签：** 不少站点的文档标题并不用 `<h1>` 渲染，
+ * 而是用 `<span>` / `<div>` / `<p>` 再挂一个 `title` 类。只看标签会漏掉这类页面，
+ * 退回站点级的 `<title>`，结果所有文档标题都一样。
+ *
+ * 判定顺序：
+ *
+ * 1. 文档里的第一个 `<h1>` —— 最明确的信号
+ * 2. 带「标题」命名的元素（**任意标签**），但必须位于正文区域：不在导航、菜单、
+ *    页头页脚、弹窗等外壳内，文本长度合理
+ * 3. 提取后正文开头的标题 —— 覆盖「文档标题与小节标题同级」的站点
+ *
+ * 第 2 步只做结构判断，不预设标签名，因此 `div.title`、`span.title`、`p.title`
+ * 都能识别；第 3 步则覆盖另一种常见结构。**荣耀的文档站正是第 3 种**：它的正文
+ * 标题与小节标题都是 `<h3>`（`功能描述`、`版本限制`……），而页面上所有带 `title`
+ * 类名的元素都是导航菜单，只有靠「正文开头的标题」才能取对。
+ *
+ * **为什么必须在 Readability 之前取：** Readability 的 `_headerDuplicatesTitle`
+ * 会用 0.75 的文本相似度判断「这个标题与文章标题重复」，把这类元素一并删除。
  * 等到 Readability 之后再找，页面标题已经没了。
  */
 function documentHeading(document: Document): string {
+  const clean = (text: string | null | undefined): string =>
+    (text ?? "").replace(/\s+/g, " ").trim();
+
+  // 1) h1 最明确
   for (const h1 of Array.from(document.querySelectorAll("h1"))) {
-    const text = (h1.textContent ?? "").replace(/\s+/g, " ").trim();
+    const text = clean(h1.textContent);
     if (text.length > 0) return text;
   }
+
+  // 2) 按结构找带「标题」命名的元素（任意标签）
+  const MAX_TITLE_CHARS = 200;
+  const candidates: Element[] = [];
+
+  for (const element of Array.from(document.querySelectorAll("[class], [id]"))) {
+    const markers = [
+      ...Array.from(element.classList),
+      element.getAttribute("id") ?? "",
+    ];
+    if (!markers.some(isTitleToken)) continue;
+    if (insideSiteChrome(element)) continue;
+
+    const text = clean(element.textContent);
+    if (text.length < 2 || text.length > MAX_TITLE_CHARS) continue;
+
+    candidates.push(element);
+  }
+
+  // 候选之间常是嵌套关系，例如荣耀的文档站：
+  //
+  //   <div class="document-title">
+  //     <span class="title">锁屏、桌面、桌面小组件联动</span>
+  //     <span class="document-title-summary-button">智能摘要</span>
+  //   </div>
+  //
+  // 外层 div 同样带「title」命名，但它的文本把旁边的按钮也捎上了。
+  // 只保留最内层的那一个，才能拿到干净的标题。
+  const innermost = candidates.filter(
+    (element) => !candidates.some((other) => other !== element && element.contains(other)),
+  );
+
+  if (innermost.length > 0) {
+    return clean(innermost[0].textContent);
+  }
+
   return "";
 }
 

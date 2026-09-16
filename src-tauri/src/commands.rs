@@ -469,11 +469,24 @@ async fn start_crawl_inner(
         }
     }
 
-    // 内容是否变过与「是否合并」无关：重复抓取同一链接本就应当跳过
+    // 内容是否变过与「是否合并」无关：重复抓取同一链接本就应当跳过。
+    // 但跳过有个前提 —— 上次产出的文档必须仍在**当前保存目录**里：
+    // 换了保存目录、或文件被删除/移动时，应当重新抓取，否则用户会拿到空结果。
     for entry in &outcome.unique {
-        if let Some(fingerprint) = record.fingerprint_of(&entry.key) {
-            known_fingerprints.insert(entry.key.clone(), fingerprint.to_string());
+        let Some(fingerprint) = record.fingerprint_of(&entry.key) else {
+            continue;
+        };
+        let Some(group) = group_by_key.get(&entry.key) else {
+            continue;
+        };
+        let Some(previous) = record.existing_file(group) else {
+            continue;
+        };
+        if previous.parent() != Some(save_dir.as_path()) {
+            continue;
         }
+
+        known_fingerprints.insert(entry.key.clone(), fingerprint.to_string());
     }
 
     let duplicate_count = outcome.duplicates.len() as u32;

@@ -7,13 +7,13 @@ use url::Url;
 /// 上限不固定为单一数值：链接越多，落在同一站点的请求就越多，既拉长运行时间
 /// （同站串行、每次至少间隔 1 秒），也更容易触发限流或验证码而中途停下。
 /// 因此交由用户按任务自行选择。
-pub const LINK_LIMIT_TIERS: [usize; 3] = [10, 50, 100];
+pub const LINK_LIMIT_TIERS: [usize; 5] = [10, 50, 100, 150, 200];
 
 /// 默认档位。
 pub const DEFAULT_LINK_LIMIT: usize = 50;
 
 /// 允许的最大档位，用于兜底。
-pub const MAX_LINK_LIMIT: usize = 100;
+pub const MAX_LINK_LIMIT: usize = 200;
 
 /// 把外部传入的上限规整到合法范围，避免出现 0 或超出上限的值。
 pub fn clamp_link_limit(limit: usize) -> usize {
