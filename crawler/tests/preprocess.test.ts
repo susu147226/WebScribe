@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { JSDOM } from "jsdom";
+import { Readability } from "@mozilla/readability";
 
 import { extractContent } from "../src/extractor/readability.js";
 import {
   detectLanguage,
   extractCodeText,
+  neutralizeHeadingIds,
   normalizeCodeBlocks,
+  preprocessForReadability,
   unwrapCodeBlockWrappers,
 } from "../src/extractor/preprocess.js";
 import { toMarkdown } from "../src/markdown/convert.js";
@@ -165,5 +168,133 @@ describe("端到端：装饰性容器内的代码块", () => {
     // 尖括号在围栏块内应保持字面量，不得被解析成 HTML 元素
     expect(block).toContain('<Var name="" />');
     expect(block).toContain('<Text x="40" />');
+  });
+});
+
+/**
+ * 回归：文档站把正文标题的 id 命名为 `header-N`，被 Readability 当成页头删掉。
+ *
+ * Readability 的「可疑元素」正则里含 `header`，本意是剥掉页面顶部导航；
+ * 实测某 OPPO 文档页 12 个 h3 小节标题因此全部消失（正文 161 个元素都在，
+ * 只有标题没了）。关闭 FLAG_STRIP_UNLIKELYS 后 12 个标题全部回来。
+ */
+describe("neutralizeHeadingIds", () => {
+  it("把含 header 的 id 换成不含触发词的新 id", () => {
+    const doc = parse('<h3 id="header-1">1. 定义</h3>');
+    neutralizeHeadingIds(doc);
+
+    const id = doc.querySelector("h3")!.getAttribute("id")!;
+    expect(id).not.toContain("header");
+    // 换名前必须确认原来确实会被误判
+    expect(Readability.prototype.REGEXPS.unlikelyCandidates.test(" header-1")).toBe(true);
+    expect(Readability.prototype.REGEXPS.unlikelyCandidates.test(` ${id}`)).toBe(false);
+  });
+
+  it("同步指向该标题的页内锚点", () => {
+    const doc = parse('<a href="#header-2">跳到第二节</a><h3 id="header-2">2. 账号</h3>');
+    neutralizeHeadingIds(doc);
+
+    const anchor = doc.querySelector("a")!.getAttribute("href")!;
+    const id = doc.querySelector("h3")!.getAttribute("id")!;
+    expect(anchor).toBe(`#${id}`);
+  });
+
+  it("不指向该标题的锚点不受影响", () => {
+    const doc = parse('<a href="#other">别处</a><h3 id="header-2">2. 账号</h3>');
+    neutralizeHeadingIds(doc);
+    expect(doc.querySelector("a")!.getAttribute("href")).toBe("#other");
+  });
+
+  it("生成的新 id 不与页面上已有 id 冲突", () => {
+    const doc = parse('<div id="section-0"></div><h3 id="header-1">标题</h3>');
+    neutralizeHeadingIds(doc);
+    const id = doc.querySelector("h3")!.getAttribute("id")!;
+    expect(id).not.toBe("section-0");
+  });
+
+  it("class 里的触发词被去掉，其余保留", () => {
+    const doc = parse('<h3 class="header big" id="x">标题</h3>');
+    neutralizeHeadingIds(doc);
+    const cls = doc.querySelector("h3")!.getAttribute("class") ?? "";
+    expect(cls).not.toContain("header");
+    expect(cls).toContain("big");
+  });
+
+  it("class 全是触发词时直接移除该属性", () => {
+    const doc = parse('<h3 class="header">标题</h3>');
+    neutralizeHeadingIds(doc);
+    expect(doc.querySelector("h3")!.hasAttribute("class")).toBe(false);
+  });
+
+  it("不触发误判的标题保持原样", () => {
+    const doc = parse('<h3 id="intro">简介</h3>');
+    neutralizeHeadingIds(doc);
+    expect(doc.querySelector("h3")!.getAttribute("id")).toBe("intro");
+  });
+
+  it("只处理标题元素，不动导航等其他元素", () => {
+    // 导航里的 header 本来就该被 Readability 剥掉，不能替它保留
+    const doc = parse('<div class="header"><a href="/">首页</a></div><h3 id="header-1">标题</h3>');
+    neutralizeHeadingIds(doc);
+    expect(doc.querySelector("div")!.getAttribute("class")).toBe("header");
+  });
+
+  it("命中「可能是正文」的词时不改动", () => {
+    const doc = parse('<h3 id="article-header">正文页头</h3>');
+    neutralizeHeadingIds(doc);
+    expect(doc.querySelector("h3")!.getAttribute("id")).toBe("article-header");
+  });
+
+  it("没有标题时返回 0", () => {
+    expect(neutralizeHeadingIds(parse("<p>正文</p>"))).toBe(0);
+  });
+});
+
+describe("端到端：正文标题不再被误删", () => {
+  /**
+   * 模拟该文档站：正文标题的 id 依次为 header-0、header-1……
+   * 不用本文件通用的 page()，因为它自带一个 h1，会与这里的页面标题冲突。
+   */
+  function docSitePage(): string {
+    const sections = Array.from(
+      { length: 5 },
+      (_, i) => `<h3 id="header-${i + 1}">${i + 1}. 第 ${i + 1} 节</h3>${FILLER}`,
+    ).join("");
+
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>某文档站</title></head><body><article><h1 id="header-0">开发者服务协议</h1>${FILLER}${sections}</article></body></html>`;
+  }
+
+  const headingTexts = (html: string): string[] =>
+    [...html.matchAll(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi)].map((m) =>
+      m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(),
+    );
+
+  it("id=header-N 的小节标题全部保留", () => {
+    const result = extractContent(docSitePage(), "http://x.test/a");
+    expect(result).not.toBeNull();
+
+    const headings = headingTexts(result!.contentHtml);
+    expect(headings).toHaveLength(5);
+    for (let i = 1; i <= 5; i++) {
+      expect(headings).toContain(`${i}. 第 ${i} 节`);
+    }
+  });
+
+  it("页面 h1 作为文档标题，其余标题留在正文", () => {
+    const result = extractContent(docSitePage(), "http://x.test/a");
+    expect(result?.title).toBe("开发者服务协议");
+    expect(result?.contentHtml).toContain("1. 第 1 节");
+    expect(result?.contentHtml).toContain("5. 第 5 节");
+  });
+
+  it("经完整预处理后标题 id 已不含触发词", () => {
+    const doc = parse(`<h1 id="header-0">标题</h1><h3 id="header-1">1. 第一节</h3><h3 id="header-2">2. 第二节</h3>`);
+    preprocessForReadability(doc);
+
+    const ids = [...doc.querySelectorAll("h1,h3")].map((h) => h.getAttribute("id") ?? "");
+    expect(ids).toHaveLength(3);
+    for (const id of ids) {
+      expect(id).not.toContain("header");
+    }
   });
 });

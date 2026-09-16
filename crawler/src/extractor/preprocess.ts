@@ -1,3 +1,5 @@
+import { Readability } from "@mozilla/readability";
+
 /**
  * 交给 Readability 之前的正文预处理。
  *
@@ -128,5 +130,98 @@ export function normalizeCodeBlocks(document: Document): number {
 /** 统一入口：在 Readability 之前调用。 */
 export function preprocessForReadability(document: Document): void {
   unwrapCodeBlockWrappers(document);
+  neutralizeHeadingIds(document);
   normalizeCodeBlocks(document);
+}
+
+/**
+ * 改写标题元素上会被 Readability 误判为「页头」的 id / class。
+ *
+ * **问题：** Readability 的 `_stripUnlikelyCandidates` 会把 id 或 class 命中
+ * 「可疑元素」正则的节点直接删掉，该正则里包含 `header` —— 本意是剥掉页面顶部的
+ * 导航，但不少文档站把**正文标题**的 id 就命名为 `header-0`、`header-1`……
+ *
+ * 实测某 OPPO 文档页：`#wikiContent` 下 173 个有文本的子元素里，161 个正常保留，
+ * 被丢掉的 12 个恰好是全部 h3 小节标题（`id="header-1"` … `id="header-12"`），
+ * 正文都在、标题全没了。关闭 Readability 的 `FLAG_STRIP_UNLIKELYS` 后 12 个标题
+ * 全部回来，据此确认原因。
+ *
+ * **做法：** 只对 **h1–h6** 处理 —— 带这类 id 的标题几乎必然是正文章节标题，
+ * 而不是页面导航（导航很少是编号连续的标题元素）。改写时保留原名作为后缀，
+ * 并同步指向它的页内锚点，避免破坏文档内的跳转。
+ *
+ * 正则直接取自 Readability 自身，不另抄一份，以免它升级后两边失配。
+ */
+export function neutralizeHeadingIds(document: Document): number {
+  // REGEXPS 挂在 Readability 的原型上，但其类型声明未导出，这里显式断言
+  const patterns = (
+    Readability.prototype as unknown as {
+      REGEXPS: { unlikelyCandidates: RegExp; okMaybeItsACandidate: RegExp };
+    }
+  ).REGEXPS;
+
+  const unlikely = patterns.unlikelyCandidates;
+  const maybe = patterns.okMaybeItsACandidate;
+
+  const matches = (pattern: RegExp, text: string): boolean => {
+    // 这些正则理论上不带 g，重置 lastIndex 只是防御
+    pattern.lastIndex = 0;
+    return pattern.test(text);
+  };
+
+  // 生成的新 id 必须避开页面上已有的 id
+  const taken = new Set(
+    Array.from(document.querySelectorAll("[id]")).map((el) => el.getAttribute("id") ?? ""),
+  );
+  const freshId = (): string => {
+    let n = 0;
+    for (;;) {
+      const candidate = `section-${n}`;
+      if (!taken.has(candidate)) {
+        taken.add(candidate);
+        return candidate;
+      }
+      n += 1;
+    }
+  };
+
+  let changed = 0;
+
+  for (const heading of Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6"))) {
+    const id = heading.getAttribute("id") ?? "";
+    const className = typeof heading.className === "string" ? heading.className : "";
+
+    if (!id && !className) continue;
+    if (!matches(unlikely, `${className} ${id}`)) continue;
+    // 命中「可能是正文」的词就不必动它 —— Readability 本来也不会删
+    if (matches(maybe, `${className} ${id}`)) continue;
+
+    if (id) {
+      // 注意：不能只在原名前加前缀 —— `ws-header-1` 里依旧带着 `header`，
+      // 仍会被正则命中。必须整体换成一个不含触发词的新 id。
+      const renamed = freshId();
+      heading.setAttribute("id", renamed);
+
+      // 同步页内锚点，别把文档里的跳转弄坏
+      for (const anchor of Array.from(document.querySelectorAll('a[href^="#"]'))) {
+        if (anchor.getAttribute("href") === `#${id}`) {
+          anchor.setAttribute("href", `#${renamed}`);
+        }
+      }
+    }
+
+    if (className) {
+      // class 里逐个 token 检查，只丢掉会触发误判的那些
+      const kept = className
+        .split(/\s+/)
+        .filter((token) => token.length > 0 && !matches(unlikely, token));
+
+      if (kept.length > 0) heading.setAttribute("class", kept.join(" "));
+      else heading.removeAttribute("class");
+    }
+
+    changed += 1;
+  }
+
+  return changed;
 }

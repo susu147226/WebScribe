@@ -1,7 +1,7 @@
 {
   "name": "webscribe",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "description": "轻量级网页文档抓取、整理与 Markdown/PDF 转存工具",
   "author": "云舒眠眠",
