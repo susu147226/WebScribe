@@ -310,4 +310,29 @@ describe("文档标题：不依赖标签，按结构判断", () => {
 
     expect(extractContent(html, "http://x.test/a")?.title).toBe("功能描述");
   });
+
+});
+/**
+ * 回归：论文摘要、小说短章、诗歌等短正文不应被误判为「无法获取正文」。
+ *
+ * 此前 MIN_CONTENT_LENGTH = 200，短于 200 字符的正当代文会被判为不充分，
+ * 走完 HTTP 与浏览器渲染后仍不达标，最终报 ContentExtractionFailed。
+ */
+describe("短正文不再被误判", () => {
+  it("150 字的摘要视为充分", () => {
+    const result = extractContent(page("摘要", `<p>${"字".repeat(150)}</p>`), "http://x.test/a");
+    expect(isContentSufficient(result)).toBe(true);
+  });
+
+  it("50 字符是充分性底线", () => {
+    const justEnough = extractContent(page("短", `<p>${"字".repeat(50)}</p>`), "http://x.test/a");
+    const tooShort = extractContent(page("更短", `<p>${"字".repeat(49)}</p>`), "http://x.test/a");
+    expect(isContentSufficient(justEnough)).toBe(true);
+    expect(isContentSufficient(tooShort)).toBe(false);
+  });
+
+  it("100 字的中文摘要视为充分", () => {
+    const result = extractContent(page("摘要", `<p>${"这是论文摘要的内容，介绍了研究背景与结论。".repeat(8)}</p>`), "http://x.test/a");
+    expect(isContentSufficient(result)).toBe(true);
+  });
 });

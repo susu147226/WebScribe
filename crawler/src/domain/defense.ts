@@ -34,6 +34,10 @@ const CAPTCHA_MARKERS: ReadonlyArray<{ pattern: RegExp; evidence: string }> = [
   { pattern: /\bclass\s*=\s*["'][^"']*\bcf-turnstile\b/i, evidence: "页面包含 cf-turnstile 元素" },
   { pattern: /\bid\s*=\s*["'](captcha|challenge-form)["']/i, evidence: "页面包含验证码容器" },
   { pattern: /\bdata-sitekey\s*=/i, evidence: "页面包含验证码 sitekey" },
+  // 中文验证码：知网等站点的「请完成安全验证」、点击/滑块验证等。
+  // 只匹配祈使句，避免误伤正文里「介绍验证码」的文章。
+  { pattern: /请完成.{0,12}(安全|人机|行为|滑块)?验证/, evidence: "页面要求完成人机验证" },
+  { pattern: /<title>[^<]*(安全验证|人机验证|行为验证|访问验证)[^<]*<\/title>/i, evidence: "页面标题为人机验证" },
 ];
 
 /** 访问验证（Challenge）类信号。 */
@@ -47,6 +51,9 @@ const CHALLENGE_MARKERS: ReadonlyArray<{ pattern: RegExp; evidence: string }> = 
   { pattern: /Enable JavaScript and cookies to continue/i, evidence: "页面要求启用 JS 与 Cookie 才能继续" },
   { pattern: /<title>\s*(Access Denied|访问被拒绝|人机验证|访问验证)/i, evidence: "页面标题提示访问受限" },
   { pattern: /ddos-guard|DDoS protection by/i, evidence: "页面为 DDoS 防护页" },
+  // WAF JS 挑战：起点等站点返回几乎为空的页面，只带一个探测脚本，
+  // 靠浏览器执行 JS 才能放行。probe.js 是这类挑战的典型入口。
+  { pattern: /<script[^>]+src\s*=\s*["'][^"']*probe\.js/i, evidence: "页面包含 WAF 探测脚本（probe.js）" },
 ];
 
 function findMatch(
@@ -145,8 +152,10 @@ export function detectDefense(
  * HTTP 正文不足时即使本函数返回 false，也应尝试一次渲染。
  */
 export function looksLikeClientRendered(html: string, extractedText: string): boolean {
+  // 与 extractor/readability.ts 的 MIN_CONTENT_LENGTH 保持一致：短正文（摘要、
+  // 短章）不该被当成「没渲染出来」，只有真正的空壳才值得回退浏览器
   const textLength = extractedText.trim().length;
-  if (textLength >= 200) return false;
+  if (textLength >= 50) return false;
 
   // 正文过短：若页面存在大量脚本或典型的 SPA 根容器，判定为客户端渲染
   const spaMarkers = [

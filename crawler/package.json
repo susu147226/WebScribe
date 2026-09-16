@@ -1,7 +1,7 @@
 {
   "name": "webscribe-crawler",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
   "description": "WebScribe 抓取 sidecar：HTTP First，必要时使用 Playwright",
   "author": "云舒眠眠",

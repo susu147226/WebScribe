@@ -26,8 +26,13 @@ export interface ExtractedContent {
   documentTitle: string;
 }
 
-/** 正文被认为有效的纯文本长度下限。 */
-export const MIN_CONTENT_LENGTH = 200;
+/** 正文被认为有效的纯文本长度下限。
+ *
+ * 这里设得较低（50 字符），是为了容纳**论文摘要、小说短章、诗歌**这类正当但
+ * 篇幅短的正文 —— 它们常常不足一两百字，若阈值过高（如 200）会被误判为
+ * 「无法获取正文」。50 字符的底线足以排除纯导航、版权声明、空白页等零星噪声。
+ */
+export const MIN_CONTENT_LENGTH = 50;
 
 /**
  * 归一化标题文本，用于比对：去空白、转小写、去除首尾标点。

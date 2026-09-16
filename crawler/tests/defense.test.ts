@@ -107,4 +107,41 @@ describe("looksLikeClientRendered", () => {
     // isContentSufficient 判断后另行尝试渲染
     expect(looksLikeClientRendered("<html><body><p>短</p></body></html>", "短")).toBe(false);
   });
+
+});
+/**
+ * 回归：WAF JS 挑战与中文验证码。
+ *
+ * 起点返回 202 + 几乎为空的页面，只带一个 probe.js 探测脚本（浏览器执行 JS 才放行）；
+ * 知网返回「请完成安全验证」的点击验证码。两者此前都因「正文不足」被误报成
+ * 「无法获取正文」，实际应是防御机制。
+ */
+describe("WAF 挑战与中文验证码", () => {
+  it("识别 WAF 探测脚本（起点 probe.js）", () => {
+    const html = '<script src="/C2WF946J0/probe.js?v=1"></script>';
+    expect(detectDefense(202, html)?.kind).toBe("ChallengeDetected");
+  });
+
+  it("识别中文人机验证（知网「请完成安全验证」）", () => {
+    const html = "<title>安全验证</title><p>请完成安全验证 请依次点击【我,看,话】</p>";
+    expect(detectDefense(200, html)?.kind).toBe("CaptchaDetected");
+  });
+
+  it("识别标题为人机验证的页面", () => {
+    expect(detectDefense(200, "<title>人机验证</title><p>x</p>")?.kind).toBe("CaptchaDetected");
+  });
+
+  it("识别行为验证类提示", () => {
+    expect(detectDefense(200, "<p>请完成行为验证</p>")?.kind).toBe("CaptchaDetected");
+  });
+
+  it("不误判介绍验证码的普通文章", () => {
+    const html = "<article><p>本文介绍如何设计一个验证码系统的原理与历史。</p></article>";
+    expect(detectDefense(200, html)).toBeNull();
+  });
+
+  it("不误判不含祈使句的验证码一词", () => {
+    // 只是提到「验证码」，没有「请完成…验证」这类祈使句
+    expect(detectDefense(200, "<p>登录时可能需要输入验证码。</p>")).toBeNull();
+  });
 });
